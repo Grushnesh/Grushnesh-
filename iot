@@ -1,0 +1,3708 @@
+Compiler multi threading support (#2240)
+* Extend examples, fix Dictionary bugs
+
+* Make sure EqualityComparer..cctors are sorted first
+
+* Extended example works
+
+* Support communication via WiFi
+
+* Add implementation of Number.ToString() to library, for debugging purposes
+
+This code from the System library implements the number formatting.
+Following the code makes it a lot easier to debug EE errors (such as
+missing sign extensions)
+
+* Start adding File I/O support
+
+* File system support mostly working
+
+But seems to require proper try/catch/finally support,
+otherwise files are not closed.
+
+* Basic support for exception handling added
+
+* Use common constants
+
+* Write as ASCII
+
+* Remove wrong warnings
+
+* Convert List to Dictionary
+
+By first only checking the name, method comparison is
+significantly faster (up to 10 times)
+
+Gives more clean internal structure
+
+* Fix date pattern
+
+* Fix a potential crash when humidity is 0
+
+See comment in code
+
+* Support replacing static constructors
+
+... in classes that are not fully replaced.
+Not really used now, since must wait for UnitsNET 5.0 to
+retry the full support again. The current reflection hack is
+just to complex.
+
+* A bit documentation update
+
+* Debugger help improved, allow selecting thread for debug
+
+* File is already in Compiler directory
+
+* New compiler command group: Exec
+
+Currently only one new command: --stop
+
+* Extended WeatherStation works
+
+* Build the compiler in a separate pipeline
+ main (#2240)
+@pgrawehr
+pgrawehr committed yesterday 
+1 parent ac55988
+commit a5d57ad
+ 
+Showing 66 changed files with 2,496 additions and 425 deletions.
+Filter changed files
+ 28 changes: 28 additions & 0 deletions28  
+.github/workflows/arduino.yml
+@@ -0,0 +1,28 @@
+# This is a basic workflow to help you get started with Actions
+
+name: Arduino_Compiler_CI
+
+# Controls when the workflow will run
+on:
+  # Triggers the workflow on push or pull request events
+  push:
+
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+  pull_request:
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+  # This workflow contains a single job called "build"
+  build:
+    # The type of runner that the job will run on
+    runs-on: windows-latest
+
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+      - name: Checkout
+        uses: actions/checkout@master
+
+      - run: |
+          eng/ArduinoCsCI.cmd %USERPROFILE% Debug
+  26 changes: 4 additions & 22 deletions26  
+azure-pipelines.yml
+@@ -68,6 +68,10 @@ stages:
+        sourceFolder: $(Build.SourcesDirectory)/artifacts/packages/$(BuildConfiguration)/Shipping
+        targetFolder: $(Build.ArtifactStagingDirectory)/Packages
+
+    - task: PublishTestResults@2
+      inputs:
+        mergeTestResults: true
+
+    - publish: $(Build.ArtifactStagingDirectory)/Packages
+      displayName: Publish Build Artifacts
+      artifact: BuildPackages
+@@ -91,28 +95,6 @@ stages:
+      displayName: 'Execute markdown-link-check'
+      condition: eq(variables['build.reason'], 'PullRequest')
+  # - job: Windows_ArduinoIntegration
+  #   displayName: Arduino Integration Tests
+  #   timeoutInMinutes: 120
+  #   pool:
+  #     vmImage: windows-2022
+
+  #   strategy:
+  #     matrix:
+  #       Build_Release:
+  #         BuildConfiguration: Release
+  #       Build_Debug:
+  #         BuildConfiguration: Debug
+
+  #   steps:
+  #   - script: build.cmd -ci 
+  #       -configuration $(BuildConfiguration)
+  #       -prepareMachine
+  #     displayName: Build Iot
+
+  #   - script: eng\ArduinoCsCI.cmd $(UserProfile) $(BuildConfiguration)
+  #     displayName: Build and run Arduino Integration Tests
+
+  - job: Linux
+    displayName: Linux Build
+    container: LinuxContainer
+  7 changes: 6 additions & 1 deletion7  
+eng/ArduinoCsCI.cmd
+@@ -5,7 +5,7 @@ REM Second argument is either "Debug" or "Release"
+if %1!==! goto :usage
+
+REM Defines the revision to check out in the ExtendedConfigurableFirmata repo
+set FIRMATA_SIMULATOR_CHECKOUT_REVISION=e2cfb5223aeb71e3a0756d67619db6c238b6acb5
+set FIRMATA_SIMULATOR_CHECKOUT_REVISION=4a3b895c062c8e48685b9018d642d2c5ea84c354
+set RUN_COMPILER_TESTS=FALSE
+
+choco install -y --no-progress arduino-cli
+@@ -16,13 +16,18 @@ arduino-cli config init
+arduino-cli config add board_manager.additional_urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_dev_index.json
+arduino-cli core update-index
+
+REM directly execute PS, we can ignore any test errors.
+powershell -ExecutionPolicy ByPass -command "%~dp0common\Build.ps1" -restore -build -ci -configuration %2 -preparemachine
+
+set ArduinoRootDir=%1\Documents\Arduino
+set acspath=%~dp0\..\tools\ArduinoCsCompiler\Frontend\bin\%2\net6.0\acs.exe
+
+git clone https://github.com/firmata/ConfigurableFirmata %ArduinoRootDir%\libraries\ConfigurableFirmata
+git clone https://github.com/pgrawehr/ExtendedConfigurableFirmata %ArduinoRootDir%\ExtendedConfigurableFirmata
+arduino-cli core install esp32:esp32
+
+git fetch --all
+git branch --list
+REM Check whether any compiler files have changed - if so, enable the (long running) compiler tests
+git diff --name-status origin/main | find /C /I "tools/ArduinoCsCompiler"
+REM Find returns 1 when the string was NOT found, we want to set the variable to true when it does find something
+  21 changes: 21 additions & 0 deletions21  
+src/devices/Arduino/ArduinoBoard.cs
+@@ -329,6 +329,27 @@ public void AddCommandHandler<T>(T newCommandHandler)
+            }
+        }
+
+        /// <summary>
+        /// Unregisters the given command handler
+        /// </summary>
+        /// <typeparam name="T">A type derived from <see cref="ExtendedCommandHandler"/></typeparam>
+        /// <param name="commandHandler">The instance</param>
+        /// <remarks>This is intended mostly for unit test scenarios, where the command handlers are recreated. It does not
+        /// remove the modes supported by the handler</remarks>
+        public void RemoveCommandHandler<T>(T commandHandler)
+            where T : ExtendedCommandHandler
+        {
+            _commandHandlersLock.EnterWriteLock();
+            try
+            {
+                _extendedCommandHandlers.Remove(commandHandler);
+            }
+            finally
+            {
+                _commandHandlersLock.ExitWriteLock();
+            }
+        }
+
+        /// <summary>
+        /// Gets the command handler with the provided type. An exact type match is performed.
+        /// </summary>
+  4 changes: 2 additions & 2 deletions4  
+src/devices/Arduino/FirmataDevice.cs
+@@ -30,7 +30,7 @@ internal sealed class FirmataDevice : IDisposable
+        private const byte FIRMATA_PROTOCOL_MAJOR_VERSION = 2;
+        private const byte FIRMATA_PROTOCOL_MINOR_VERSION = 5; // 2.5 works, but 2.6 is recommended
+        private const int FIRMATA_INIT_TIMEOUT_SECONDS = 2;
+        internal static readonly TimeSpan DefaultReplyTimeout = TimeSpan.FromMilliseconds(2000);
+        internal static readonly TimeSpan DefaultReplyTimeout = TimeSpan.FromMilliseconds(3000);
+
+        private byte _firmwareVersionMajor;
+        private byte _firmwareVersionMinor;
+@@ -1209,7 +1209,7 @@ internal void DisableAnalogReporting(int pinNumber, int analogChannel)
+                    pwmCommandSequence.WriteByte((byte)0);
+                    pwmCommandSequence.WriteByte((byte)FirmataCommand.END_SYSEX);
+                    SendCommand(pwmCommandSequence);
+                }
+        }
+            }
+        }
+
+  22 changes: 5 additions & 17 deletions22  
+src/devices/CharacterLcd/LcdInterface.I2c4Bit.cs
+@@ -24,11 +24,13 @@ private sealed class I2c4Bit : LcdInterface
+
+            private readonly I2cDevice _i2cDevice;
+            private bool _backlightOn;
+            private int _backlightFlag;
+
+            public I2c4Bit(I2cDevice i2cDevice)
+            {
+                _i2cDevice = i2cDevice ?? throw new ArgumentNullException(nameof(i2cDevice));
+                _backlightOn = true;
+                _backlightFlag = LCD_BACKLIGHT;
+                InitDisplay();
+            }
+
+@@ -44,26 +46,12 @@ public override bool BacklightOn
+                set
+                {
+                    _backlightOn = value;
+                    _backlightFlag = value ? LCD_BACKLIGHT : 0;
+                    // Need to send a command to make this happen immediately.
+                    SendCommandAndWait(0);
+                }
+            }
+
+            private byte BacklightFlag
+            {
+                get
+                {
+                    if (BacklightOn)
+                    {
+                        return LCD_BACKLIGHT;
+                    }
+                    else
+                    {
+                        return 0;
+                    }
+                }
+            }
+
+            private void InitDisplay()
+            {
+                // This sequence (copied from a python example) completely resets the display (if it was
+@@ -89,8 +77,8 @@ public override void SendCommand(byte command)
+
+            private void Write4Bits(byte command)
+            {
+                _i2cDevice.WriteByte((byte)(command | ENABLE | BacklightFlag));
+                _i2cDevice.WriteByte((byte)((command & ~ENABLE) | BacklightFlag));
+                _i2cDevice.WriteByte((byte)(command | ENABLE | _backlightFlag));
+                _i2cDevice.WriteByte((byte)((command & ~ENABLE) | _backlightFlag));
+            }
+
+            public override void SendCommands(ReadOnlySpan<byte> commands)
+  6 changes: 6 additions & 0 deletions6  
+tools/ArduinoCsCompiler/ArduinoCsCompiler.csproj
+@@ -29,4 +29,10 @@
+    <ProjectReference Include="..\..\src\System.Device.Gpio\System.Device.Gpio.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>$(AssemblyName).Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+</Project>
+  9 changes: 9 additions & 0 deletions9  
+tools/ArduinoCsCompiler/ArduinoImplementationAttribute.cs
+@@ -107,6 +107,15 @@ public bool MergeGenericImplementations
+            set;
+        }
+
+        /// <summary>
+        /// Set to true for methods that are only called by the runtime (e.g. thread start callbacks)
+        /// </summary>
+        public bool InternalCall
+        {
+            get;
+            set;
+        }
+
+        /// <summary>
+        /// Computes a hash code for a string that stays consistent over different architectures and between program runs.
+        /// </summary>
+  4 changes: 2 additions & 2 deletions4  
+tools/ArduinoCsCompiler/ArduinoMethodDeclaration.cs
+@@ -40,13 +40,13 @@ public ArduinoMethodDeclaration(int token, EquatableMethod methodBase, ArduinoMe
+            Name = $"{MethodBase.MethodSignature()} (Token 0x{Token:X})";
+        }
+
+        public ArduinoMethodDeclaration(int token, EquatableMethod methodBase, ArduinoMethodDeclaration? requestedBy, IlCode code)
+        public ArduinoMethodDeclaration(int token, EquatableMethod methodBase, ArduinoMethodDeclaration? requestedBy, IlCode code, MethodFlags extraFlags)
+        {
+            Index = -1;
+            MethodBase = methodBase;
+            RequestedBy = requestedBy;
+            Code = code;
+            Flags = MethodFlags.None;
+            Flags = extraFlags;
+            Token = token;
+
+            var attribs = methodBase.GetCustomAttributes(typeof(ArduinoImplementationAttribute)).Cast<ArduinoImplementationAttribute>().ToList();
+  53 changes: 52 additions & 1 deletion53  
+tools/ArduinoCsCompiler/ClassDeclaration.cs
+@@ -7,7 +7,7 @@
+#pragma warning disable CS1591
+namespace ArduinoCsCompiler
+{
+    public class ClassDeclaration
+    public class ClassDeclaration : IEquatable<ClassDeclaration>
+    {
+        private readonly List<ClassMember> _members;
+        private readonly List<Type> _interfaces;
+@@ -70,6 +70,57 @@ public bool SuppressInit
+            }
+        }
+
+        public bool Equals(ClassDeclaration? other)
+        {
+            if (ReferenceEquals(null, other))
+            {
+                return false;
+            }
+
+            if (ReferenceEquals(this, other))
+            {
+                return true;
+            }
+
+            // Here, Type and MiniType must be distinct.
+            return NewToken == other.NewToken && Name == other.Name;
+        }
+
+        public override bool Equals(object? obj)
+        {
+            if (ReferenceEquals(null, obj))
+            {
+                return false;
+            }
+
+            if (ReferenceEquals(this, obj))
+            {
+                return true;
+            }
+
+            if (obj.GetType() != GetType())
+            {
+                return false;
+            }
+
+            return Equals((ClassDeclaration)obj);
+        }
+
+        public override int GetHashCode()
+        {
+            return NewToken;
+        }
+
+        public static bool operator ==(ClassDeclaration? left, ClassDeclaration? right)
+        {
+            return Equals(left, right);
+        }
+
+        public static bool operator !=(ClassDeclaration? left, ClassDeclaration? right)
+        {
+            return !Equals(left, right);
+        }
+
+        public void AddClassMember(ClassMember member)
+        {
+            if (ReadOnly)
+  4 changes: 2 additions & 2 deletions4  
+tools/ArduinoCsCompiler/CompilerCommandHandler.cs
+@@ -196,7 +196,7 @@ private bool ParseReply(byte[] data, ExecutorCommand expectedCommand, ref Comman
+                    }
+                    else if (data[2] == (byte)ExecutorCommand.ConditionalBreakpointHit || data[2] == (byte)ExecutorCommand.Variables)
+                    {
+                        _compiler.OnCompilerCallback(data[3] | (data[4] << 7), MethodState.Debugging, data);
+                        _compiler.OnCompilerCallback(data[4] | (data[5] << 7), MethodState.Debugging, data);
+                    }
+                }
+                else
+@@ -344,7 +344,7 @@ public void SendMethod(ArduinoMethodDeclaration decl, ClassMember[] localTypes,
+        {
+            FirmataIlCommandSequence sequence = new FirmataIlCommandSequence(ExecutorCommand.DeclareMethod);
+            sequence.SendInt32(declarationToken);
+            sequence.WriteByte((byte)methodFlags);
+            sequence.SendUInt14((ushort)methodFlags);
+            sequence.WriteByte(maxStack);
+            sequence.WriteByte(argCount);
+            sequence.SendInt32((int)nativeMethod);
+  3 changes: 3 additions & 0 deletions3  
+tools/ArduinoCsCompiler/CompilerSettings.cs
+@@ -19,6 +19,7 @@ public CompilerSettings()
+            AdditionalSuppressions = new List<string>();
+            LaunchProgramFromFlash = false;
+            MaxMemoryUsage = 256 * 1024;
+            UsePreviewFeatures = false;
+        }
+
+        /// <summary>
+@@ -93,6 +94,8 @@ public bool ForceFlashWrite
+            set;
+        }
+
+        public bool UsePreviewFeatures { get; set; }
+
+        object ICloneable.Clone()
+        {
+            return MemberwiseClone();
+  175 changes: 131 additions & 44 deletions175  
+tools/ArduinoCsCompiler/Debugger.cs
+@@ -24,7 +24,7 @@ public class Debugger
+        private readonly BlockingCollection<(DebuggerDataKind Kind, byte[] Data)> _debugDataReceived;
+        private byte[] _lastData;
+
+        private List<(string CommandName, Action<string[]> Operation, string CommandHelp)> _debuggerCommands;
+        private List<DebuggerOperation> _debuggerCommands;
+
+        internal Debugger(MicroCompiler compiler, ExecutionSet set)
+        {
+@@ -35,24 +35,66 @@ internal Debugger(MicroCompiler compiler, ExecutionSet set)
+            _debugDataReceived = new();
+            _debuggerCommands = new()
+            {
+                ("quit", Quit, "Exit debugger(but keep code running"),
+                ("code", WriteCurrentInstructions, "Show code in current method. [ARG1] = Number of instructions before and after the current"),
+                ("continue", Continue, "Continue execution"),
+                ("bp", BreakPoint, "Toggle breakpoints. [ARG1] Method"),
+                ("break", DebuggerBreak, "Break execution"),
+                ("help", PrintHelp, "Print Command help"),
+                ("stack", WriteCurrentStack, "Show current stack frames"),
+                ("kill", Kill, "Terminate program"),
+                ("into", (x) => SendDebuggerCommand(DebuggerCommand.StepInto), "Step into current instruction"),
+                ("over", StepOver, "Step over current instruction"),
+                ("leave", (x) => SendDebuggerCommand(DebuggerCommand.StepOut), "Leave current method"),
+                ("locals", Locals, "Retrieve values of locals. [ARG1] = Stack frame number (default: current)"),
+                ("arguments", Arguments, "Retrieve values of method arguments. [ARG1] = Stack frame number (default: current)"),
+                ("evalstack", EvaluationStack, "Retrieve values from the current evaluation stack. [ARG1] = Stack frame number (default: current)"),
+                ("exception", x => SendDebuggerCommand(DebuggerCommand.BreakOnExceptions), "Break when an exception occurs"),
+                new DebuggerOperation("quit", Quit, "Exit debugger(but keep code running", @"Syntax: Quit"),
+                new DebuggerOperation("code", WriteCurrentInstructions, "Show code in current method. [ARG1] = Number of instructions before and after the current method", @"Syntax: code [number]
+Prints [number] of IL instructions before and after the current PC. If [number] is not specified, the whole method is printed."),
+                new DebuggerOperation("continue", Continue, "Continue execution", @"Syntax: continue
+Continue execution, stop at next breakpoint (if any)"),
+                new DebuggerOperation("bp", BreakPoint, "Toggle breakpoints.", @"Syntax: bp Method.Name [overload number] [offset]
+If the name is not unique, a list of matching methods is printed.
+Specify [overload number] to select from the list.
+[Offset] is the Hex offset within the method where to set the breakpoint"),
+                new DebuggerOperation("break", DebuggerBreak, "Break execution", @"Syntax: break [threadId]
+Interrupt a running process, optionally specifying the thread to halt on"),
+                new DebuggerOperation("help", PrintHelp, "Print Command help.", "Help [Command]: Print help for the given command"),
+                new DebuggerOperation("stack", WriteCurrentStack, "Show current stack frames", @"Syntax: stack
+Prints a stack trace"),
+                new DebuggerOperation("kill", Kill, "Terminate program", @"Syntax: Kill
+Terminate the current program"),
+                new DebuggerOperation("into", (x) => SendDebuggerCommand(DebuggerCommand.StepInto), "Step into current instruction", @"Syntax: into
+Single step trough the program, entering a sub-method when the next instruction is a call, callvirt or new instruction"),
+                new DebuggerOperation("over", StepOver, "Step over current instruction", @"Syntax: over
+Single step trough the program, jumping over call instructions
+This will attempt to stay in the same method. May stop at a different instance of the current
+method in case of recursion"), // This is a known limitation
+                new DebuggerOperation("leave", (x) => SendDebuggerCommand(DebuggerCommand.StepOut), "Leave current method", @"Syntax: leave
+Runs program until the current method ends"),
+                new DebuggerOperation("locals", Locals, "Retrieve values of locals. [ARG1] = Stack frame number (default: current)", @"Syntax: locals [StackFrame]
+Prints the local variables of [stack frame]. Use stack command to find the list of active stacks.
+Defaults to the current frame"),
+                new DebuggerOperation("arguments", Arguments, "Retrieve values of method arguments. [ARG1] = Stack frame number (default: current)", @"Syntax: arguments [StackFrame]
+Prints the arguments of the given [stack frame]. Defaults to the active frame"),
+                new DebuggerOperation("evalstack", EvaluationStack, "Retrieve values from the current evaluation stack. [ARG1] = Stack frame number (default: current)", @"Syntax: evalstack [StackFrame]
+Prints the evaluation stack of the given [stack frame]. Defaults to the active frame."),
+                new DebuggerOperation("exception", x => SendDebuggerCommand(DebuggerCommand.BreakOnExceptions), "Break when an exception occurs", @"Syntax: exception
+Breaks execution when an exception is thrown."),
+                new DebuggerOperation("thread", SelectThread, "Switch to thread", @"Syntax: thread [ThreadId]
+Switch to thread [ThreadId]. Breakpoints will only be hit on the given thread.
+Use -1 to allow breaking on all threads.")
+            };
+        }
+
+        public static List<RemoteStackFrame> DecodeStackTrace(ExecutionSet set, byte[] data)
+        {
+            if (data.Length == 0)
+            {
+                return new List<RemoteStackFrame>();
+            }
+
+            int taskId = data[3] << 8 | data[4];
+
+            List<int> stackTokens = new List<int>();
+            int idx = 6;
+            while (idx <= data.Length - 5)
+            {
+                int token = FirmataCommandSequence.DecodeInt32(data, idx);
+                stackTokens.Add(token);
+                idx += 5;
+            }
+
+            return DecodeStackTrace(set, taskId, stackTokens);
+        }
+
+        private void Locals(string[] args)
+        {
+            int stackFrame = -1;
+@@ -90,8 +132,7 @@ private void BreakPoint(string[] args)
+        {
+            if (args.Length <= 1)
+            {
+                Console.WriteLine("Syntax: bp Method.Name [overload number] [offset]");
+                Console.WriteLine("The method name does not need to be unique. If [overload number] is not specified, a list of matching methods will be printed.");
+                PrintHelp("bp");
+                return;
+            }
+
+@@ -112,7 +153,7 @@ private void BreakPoint(string[] args)
+                }
+            }
+
+            if (methods.Count > 1)
+            if (methods.Count > 1 && overload == -1)
+            {
+                Console.WriteLine("The following methods match your query:");
+                int idx = 0;
+@@ -122,21 +163,22 @@ private void BreakPoint(string[] args)
+                    idx++;
+                }
+
+                if (overload == -1)
+                {
+                    Console.WriteLine("Please specify an overload number");
+                    return;
+                }
+                Console.WriteLine("Please specify an overload number");
+                return;
+            }
+            else
+            else if (methods.Count == 1)
+            {
+                overload = 0;
+            }
+
+            int startOffset = 0;
+            if (args.Length > 3)
+            {
+                Int32.TryParse(args[3], NumberStyles.Any, CultureInfo.CurrentCulture, out startOffset);
+                if (!TryParseHexOrDec(args[3], out startOffset))
+                {
+                    Console.WriteLine($"Unable to parse {args[3]} as offset");
+                    return;
+                }
+            }
+
+            if (overload < methods.Count)
+@@ -145,7 +187,17 @@ private void BreakPoint(string[] args)
+                Console.WriteLine($"Setting breakpoint in method {methodToBreakAt.MethodBase.MethodSignature()} at offset 0x{startOffset:X}");
+                _commandHandler.SendDebuggerCommand(DebuggerCommand.BreakPoint, methodToBreakAt.Token, startOffset);
+            }
+        }
+
+        public static bool TryParseHexOrDec(string input, out int number)
+        {
+            input = input.Trim();
+            if (input.StartsWith("0x", StringComparison.InvariantCultureIgnoreCase) && input.Length > 2)
+            {
+                return Int32.TryParse(input.Substring(2), NumberStyles.HexNumber, CultureInfo.CurrentCulture, out number);
+            }
+
+            return Int32.TryParse(input, NumberStyles.Any, CultureInfo.CurrentCulture, out number);
+        }
+
+        private void StepOver(string[] args)
+@@ -175,6 +227,23 @@ private void StepOver(string[] args)
+            }
+        }
+
+        private void SelectThread(string[] args)
+        {
+            if (args.Length <= 1)
+            {
+                PrintHelp("thread");
+                return;
+            }
+
+            if (!Int32.TryParse(args[1], NumberStyles.Integer, CultureInfo.CurrentCulture, out int result))
+            {
+                PrintHelp("thread");
+                return;
+            }
+
+            _commandHandler.SendDebuggerCommand(DebuggerCommand.SelectThread, result);
+        }
+
+        private void SendDebuggerCommand(DebuggerCommand command)
+        {
+            _commandHandler.SendDebuggerCommand(command);
+@@ -272,7 +341,16 @@ public bool ProcessCommandLine(string currentInput)
+
+        private void DebuggerBreak(string[] args)
+        {
+            _commandHandler.SendDebuggerCommand(DebuggerCommand.Break);
+            int thread = -1;
+            if (args.Length > 1)
+            {
+                if (!Int32.TryParse(args[1], NumberStyles.Integer, CultureInfo.CurrentCulture, out thread))
+                {
+                    Console.WriteLine($"{args[1]} is not a valid thread number");
+                }
+            }
+
+            _commandHandler.SendDebuggerCommand(DebuggerCommand.Break, thread);
+        }
+
+        private void Quit(string[] args)
+@@ -294,8 +372,33 @@ private void Kill(string[] args)
+            }
+        }
+
+        private void PrintHelp(string cmd)
+        {
+            PrintHelp(new string[]
+            {
+                "help",
+                cmd
+            });
+        }
+
+        public void PrintHelp(string[] args)
+        {
+            if (args.Length >= 2)
+            {
+                Console.WriteLine($"Help for command {args[1]}:");
+                var cmd = _debuggerCommands.FirstOrDefault(x => x.CommandName == args[1]);
+                if (cmd == null)
+                {
+                    Console.WriteLine("No such command");
+                }
+                else
+                {
+                    Console.WriteLine(cmd.LongHelp);
+                }
+
+                return;
+            }
+
+            Console.WriteLine("Debugger command help (abbreviations are allowed, as long as they're unique):");
+            Console.WriteLine();
+            foreach (var item in _debuggerCommands.OrderBy(x => x.CommandName))
+@@ -390,23 +493,7 @@ public void ExecuteAfterDataReceived(TimeSpan waitTime, Action<(DebuggerDataKind
+
+        public List<RemoteStackFrame> DecodeStackTrace(byte[] data)
+        {
+            if (data.Length == 0)
+            {
+                return new List<RemoteStackFrame>();
+            }
+
+            int taskId = data[3] << 8 | data[4];
+
+            List<int> stackTokens = new List<int>();
+            int idx = 6;
+            while (idx <= data.Length - 5)
+            {
+                int token = FirmataCommandSequence.DecodeInt32(data, idx);
+                stackTokens.Add(token);
+                idx += 5;
+            }
+
+            return DecodeStackTrace(_set, taskId, stackTokens);
+            return DecodeStackTrace(_set, data);
+        }
+
+        public void StartDebugging(bool stopImmediately)
+  3 changes: 2 additions & 1 deletion3  
+tools/ArduinoCsCompiler/DebuggerCommand.cs
+@@ -24,6 +24,7 @@ public enum DebuggerCommand : byte
+        SendArguments,
+        SendEvaluationStack,
+        BreakOnExceptions,
+        BreakPoint
+        BreakPoint,
+        SelectThread
+    }
+}
+ 15 changes: 15 additions & 0 deletions15  
+tools/ArduinoCsCompiler/DebuggerOperation.cs
+@@ -0,0 +1,15 @@
+﻿// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace ArduinoCsCompiler
+{
+    internal record DebuggerOperation(string CommandName, Action<string[]> Operation, string CommandHelp, string LongHelp)
+    {
+    }
+}
+  5 changes: 5 additions & 0 deletions5  
+tools/ArduinoCsCompiler/EquatableMethod.cs
+@@ -516,5 +516,10 @@ public override string ToString()
+        {
+            return this.MethodSignature(false);
+        }
+
+        public MethodImplAttributes GetMethodImplementationFlags()
+        {
+            return Method.GetMethodImplementationFlags();
+        }
+    }
+}
+  5 changes: 5 additions & 0 deletions5  
+tools/ArduinoCsCompiler/ErrorManager.cs
+@@ -95,5 +95,10 @@ public static void PrintImporantMessages()
+                Console.WriteLine(msg.ToString());
+            }
+        }
+
+        public static void Clear()
+        {
+            _messages.Clear();
+        }
+    }
+}
+  108 changes: 102 additions & 6 deletions108  
+tools/ArduinoCsCompiler/ExecutionSet.cs
+@@ -6,7 +6,9 @@
+using System.IO;
+using System.Linq;
+using System.Reflection;
+using System.Runtime.Versioning;
+using System.Text;
+using System.Threading;
+using ArduinoCsCompiler.Runtime;
+using Iot.Device.Common;
+using Microsoft.Extensions.Logging;
+@@ -78,6 +80,7 @@ static ExecutionSet()
+            KnownTypeTokensMap.Add(typeof(Array), KnownTypeTokens.Array);
+            KnownTypeTokensMap.Add(typeof(MiniArray), KnownTypeTokens.Array);
+            KnownTypeTokensMap.Add(typeof(Exception), KnownTypeTokens.Exception);
+            KnownTypeTokensMap.Add(typeof(Thread), KnownTypeTokens.Thread);
+            KnownTypeTokensMap.Add(typeof(ArithmeticException), KnownTypeTokens.ArithmeticException);
+            KnownTypeTokensMap.Add(typeof(DivideByZeroException), KnownTypeTokens.DivideByZeroException);
+            KnownTypeTokensMap.Add(typeof(NullReferenceException), KnownTypeTokens.NullReferenceException);
+@@ -688,7 +691,20 @@ internal int GetOrAddMethodToken(EquatableMethod methodBase, EquatableMethod cal
+                return GetOrAddMethodToken(replacement, callingMethod);
+            }
+
+            token = _nextToken++;
+            if (methodBase.DeclaringType == typeof(Thread) && methodBase.Name == "StartCallback")
+            {
+                // We need to be able to recognize this method in the backend
+                token = (int)KnownTypeTokens.ThreadStartCallback;
+            }
+            else if (methodBase.DeclaringType != null && methodBase.DeclaringType.FullName == "System.Threading.TimerQueue" && methodBase.Name == "AppDomainTimerCallback")
+            {
+                token = (int)KnownTypeTokens.AppDomainTimerCallback;
+            }
+            else
+            {
+                token = _nextToken++;
+            }
+
+            _patchedMethodTokens.Add(methodBase, token);
+            _inversePatchedMethodTokens.Add(token, methodBase);
+            return token;
+@@ -884,6 +900,12 @@ internal bool AddClass(ClassDeclaration type)
+                return false;
+            }
+
+            // Unless this compiler setting is enabled, we automatically suppress all preview features (in .NET 6.0 for instance the INumber<T> interfaces)
+            if (!_compilerSettings.UsePreviewFeatures && type.TheType.GetCustomAttributes(typeof(RequiresPreviewFeaturesAttribute), true).Any())
+            {
+                return false;
+            }
+
+            if (_classes.Any(x => x.TheType == type.TheType))
+            {
+                return false;
+@@ -897,6 +919,7 @@ internal bool AddClass(ClassDeclaration type)
+            ClearStatistics();
+            _classes.Add(type);
+            _logger.LogDebug($"Class {type.TheType.MemberInfoSignature(true)} added to the execution set with token 0x{type.NewToken:X}");
+            PrintProgress();
+            return true;
+        }
+
+@@ -920,8 +943,9 @@ internal bool HasDefinition(Type classType)
+            return false;
+        }
+
+        internal bool HasMethod(EquatableMethod m, EquatableMethod callingMethod, out IlCode? found)
+        internal bool HasMethod(EquatableMethod m, EquatableMethod callingMethod, out IlCode? found, out int newToken)
+        {
+            newToken = 0;
+            if (_classesToSuppress.Contains(m.DeclaringType!))
+            {
+                found = null;
+@@ -935,8 +959,15 @@ internal bool HasMethod(EquatableMethod m, EquatableMethod callingMethod, out Il
+            }
+
+            var find = _methods.FirstOrDefault(x => EquatableMethod.AreMethodsIdentical(x.MethodBase, m.Method));
+            found = find?.Code;
+            return find != null;
+            if (find != null)
+            {
+                found = find.Code;
+                newToken = find.Token;
+                return true;
+            }
+
+            found = null;
+            return false;
+        }
+
+        internal bool AddMethod(ArduinoMethodDeclaration method)
+@@ -992,6 +1023,8 @@ internal bool AddMethod(ArduinoMethodDeclaration method)
+                _logger.LogDebug($"Method {method.MethodBase.MethodSignature(false)} added to the execution set with token 0x{method.Token:X}");
+            }
+
+            PrintProgress();
+
+            return true;
+        }
+
+@@ -1122,6 +1155,34 @@ internal void AddReplacementType(Type? typeToReplace, Type replacement, bool inc
+                }
+            }
+
+            // If the replacement has a static ctor, also replace it
+            foreach (var methoda in replacement.GetConstructors(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static))
+            {
+                // Replace these only if explicitly requested (would need testing of impact otherwise)
+                if (!EquatableMethod.HasArduinoImplementationAttribute(methoda, out _))
+                {
+                    continue;
+                }
+
+                bool found = false;
+                // Above, we only check the public methods, here we also look at the private ones
+                foreach (var methodb in typeToReplace.GetConstructors(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static))
+                {
+                    if (EquatableMethod.MethodsHaveSameSignature(methoda, methodb))
+                    {
+                        // Method A shall replace Method B
+                        AddReplacementMethod(methodb, methoda);
+                        found = true;
+                        break;
+                    }
+                }
+
+                if (!found)
+                {
+                    ErrorManager.AddWarning("ACS0008", $"{replacement.FullName} specifies a static ctor to replace, but the original class has none");
+                }
+            }
+
+            foreach (var m in ctorsNeedingReplacement)
+            {
+                AddReplacementMethod(m, null);
+@@ -1190,8 +1251,9 @@ internal void AddReplacementType(Type? typeToReplace, Type replacement, bool inc
+                    return null;
+                }
+
+                throw new InvalidOperationException($"Should have a replacement for {original.MethodSignature()}, but it is missing. Caller: {callingMethod.MethodSignature()}. " +
+                ErrorManager.AddError("ACS0007", $"Should have a replacement for {original.MethodSignature()}, but it is missing. Caller: {callingMethod.MethodSignature()}. " +
+                                                    $"Original implementation is in {original.DeclaringType!.AssemblyQualifiedName}");
+                return null;
+            }
+
+            return elem.Item2;
+@@ -1488,7 +1550,7 @@ public void WriteMapFile(string tokenMapFile)
+                var pm = _patchedMethodTokens.FirstOrDefault(x => (uint)x.Value == token);
+                if (pm.Value != 0)
+                {
+                    w.WriteLine($"0x{token:X8} (Method, not loaded or no implementation present) {pm.Key.Name}");
+                    w.WriteLine($"0x{token:X8} (Method, not loaded or no implementation present) {pm.Key.MemberInfoSignature()}");
+                    continue;
+                }
+
+@@ -1590,6 +1652,14 @@ private void ClearStatistics()
+            Statistics = null;
+        }
+
+        private void PrintProgress()
+        {
+            if ((_methods.Count + _classes.Count) % 100 == 0)
+            {
+                _logger.LogInformation($"Collected {_classes.Count} classes and {_methods.Count} methods. And counting...");
+            }
+        }
+
+        /// <summary>
+        /// Remove initializer fields (in PrivateImplementationDetails) that are unused.
+        /// We initialize the class as a whole, but only in the end we know which fields are actually used.
+@@ -1614,5 +1684,31 @@ public void RemoveUnusedDataFields()
+                }
+            }
+        }
+
+        /// <summary>
+        /// Create a table that allows fast lookups for ResolveClassFromFieldToken and ResolveClassFromCtorToken
+        /// </summary>
+        public void AddReverseFieldLookupTable()
+        {
+            Dictionary<int, ClassDeclaration> fieldOrCtorTokenToClass = new Dictionary<int, ClassDeclaration>();
+            foreach (var c in Classes)
+            {
+                foreach (var f in c.Members)
+                {
+                    // Tokens might be found in multiple classes, due to class replacements (fields in replacement classes shadow the original counterpart)
+                    if (f.Field != null)
+                    {
+                        fieldOrCtorTokenToClass[f.Token] = c;
+                    }
+
+                    if (f.Method is ConstructorInfo)
+                    {
+                        fieldOrCtorTokenToClass[f.Token] = c;
+                    }
+                }
+            }
+
+            _logger.LogDebug($"Got {fieldOrCtorTokenToClass.Count} members in reverse lookup index");
+        }
+    }
+}
+  9 changes: 9 additions & 0 deletions9  
+tools/ArduinoCsCompiler/Frontend/CompilerOptions.cs
+@@ -19,6 +19,8 @@ public CompilerOptions()
+            InputAssembly = string.Empty;
+            EntryPoint = string.Empty;
+            TokenMapFile = string.Empty;
+            UsePreviewFeatures = false;
+            Suppressions = new List<string>();
+        }
+
+        [Usage(ApplicationAlias = "acs")]
+@@ -59,5 +61,12 @@ public static IEnumerable<Example> Examples
+        [Option('c', "culture", HelpText = "The name of the culture to use for 'CultureInfo.CurrentCulture'. Must be a valid culture name such as 'de-CH' or 'Invariant'. " +
+                                           "Defaults to the current culture during compile.")]
+        public string? CultureName { get; set; }
+
+        [Option("preview", HelpText = "Enable preview features of the runtime", Default = false)]
+        public bool UsePreviewFeatures { get; set; }
+
+        [Option('s', "suppress", HelpText = "Suppress the given class(es). " +
+                                                "Removes these classes (fully qualified names) from the execution set. Separate by ','", Separator = ',')]
+        public IList<string> Suppressions { get; set; }
+    }
+}
+  31 changes: 26 additions & 5 deletions31  
+tools/ArduinoCsCompiler/Frontend/CompilerRun.cs
+@@ -141,7 +141,9 @@ private void RunCompiler(FileInfo inputInfo)
+                CreateKernelForFlashing = false,
+                ForceFlashWrite = !CommandLineOptions.DoNotWriteFlashIfAlreadyCurrent,
+                LaunchProgramFromFlash = true,
+                UseFlashForProgram = true
+                UseFlashForProgram = true,
+                UsePreviewFeatures = CommandLineOptions.UsePreviewFeatures,
+                AdditionalSuppressions = CommandLineOptions.Suppressions,
+            };
+
+            Logger.LogInformation("Collecting method information and metadata...");
+@@ -180,7 +182,16 @@ private void RunCompiler(FileInfo inputInfo)
+                    {
+                        _compiler.ExecuteStaticCtors(set);
+                        var remoteMain = set.MainEntryPoint;
+                        remoteMain.InvokeAsync();
+                        if (set.MainEntryPointMethod != null && set.MainEntryPointMethod.GetParameters().Length > 0)
+                        {
+                            // If we're calling a real "main" method, we have to provide an empty string array as argument.
+                            remoteMain.InvokeAsync(new object[] { Array.Empty<string>() });
+                        }
+                        else
+                        {
+                            remoteMain.InvokeAsync();
+                        }
+
+                        Logger.LogInformation("Program upload successful. Main method invoked. The program is now running.");
+                        return;
+                    }
+@@ -264,9 +275,19 @@ private void RunCompiler(FileInfo inputInfo)
+                }
+                catch (Exception x)
+                {
+                    Logger.LogError($"Code execution caused an exception of type {x.GetType().FullName} on the microcontroller.");
+                    Logger.LogError(x.Message);
+                    Abort();
+                    // Check whether the source of the exception is the compiler itself or really the remote code
+                    if (x.StackTrace != null && x.StackTrace.Contains(nameof(ArduinoTask.GetMethodResults)))
+                    {
+                        Logger.LogError($"Code execution caused an exception of type {x.GetType().FullName} on the microcontroller.");
+                        Logger.LogError(x.Message);
+                        Abort();
+                    }
+                    else
+                    {
+                        Logger.LogError($"Internal error in compiler: {x.Message}");
+                        Logger.LogError(x.ToString());
+                        Abort();
+                    }
+                }
+            }
+        }
+ 22 changes: 22 additions & 0 deletions22  
+tools/ArduinoCsCompiler/Frontend/ExecOptions.cs
+@@ -0,0 +1,22 @@
+﻿// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+
+using CommandLine;
+
+namespace ArduinoCsCompiler
+{
+    [Verb("exec", HelpText = "Provides some direct commands to the board")]
+    internal class ExecOptions : CommonConnectionOptions
+    {
+        public ExecOptions()
+        {
+        }
+
+        [Option("stop", Default = false, HelpText = "Stop execution of any program on the microcontroller. This may be needed to get it back to a responsive state")]
+        public bool Stop
+        {
+            get;
+            set;
+        }
+    }
+}
+ 54 changes: 54 additions & 0 deletions54  
+tools/ArduinoCsCompiler/Frontend/ExecRun.cs
+@@ -0,0 +1,54 @@
+﻿// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+
+using System;
+using Iot.Device.Arduino;
+using Microsoft.Extensions.Logging;
+
+namespace ArduinoCsCompiler;
+
+internal class ExecRun : Run<ExecOptions>
+{
+    private ArduinoBoard? _board;
+
+    public ExecRun(ExecOptions execOptions)
+        : base(execOptions)
+    {
+    }
+
+    public override bool RunCommand()
+    {
+        if (!ConnectToBoard(CommandLineOptions, out _board))
+        {
+            return false;
+        }
+
+        var compiler = new MicroCompiler(_board, true);
+
+        if (!compiler.QueryBoardCapabilities(out var caps))
+        {
+            Logger.LogError("Couldn't query board capabilities. Possibly incompatible firmware");
+            return false;
+        }
+
+        if (CommandLineOptions.Stop)
+        {
+            compiler.KillTask(null);
+            Logger.LogInformation("All tasks terminated");
+        }
+        else
+        {
+            Logger.LogError("No subcommand given - nothing was done");
+        }
+
+        return true;
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        _board?.Dispose();
+        _board = null;
+
+        base.Dispose(disposing);
+    }
+}
+  8 changes: 6 additions & 2 deletions8  
+tools/ArduinoCsCompiler/Frontend/Program.cs
+@@ -34,7 +34,6 @@ private static int Main(string[] args)
+            }
+
+            Console.WriteLine($"ArduinoCsCompiler - Version {version.Version}");
+            Console.WriteLine("This tool is in an experimental state - the functionality may significantly change in the future.");
+            bool runResult = false;
+
+            var parser = new Parser(x =>
+@@ -47,7 +46,7 @@ private static int Main(string[] args)
+                x.HelpWriter = Console.Out;
+            });
+
+            var result = parser.ParseArguments<CompilerOptions, PrepareOptions, TestOptions>(args)
+            var result = parser.ParseArguments<CompilerOptions, PrepareOptions, TestOptions, ExecOptions>(args)
+                .WithParsed<CompilerOptions>(o =>
+                {
+                    using var program = new CompilerRun(o);
+@@ -63,6 +62,11 @@ private static int Main(string[] args)
+                {
+                    using var program = new TestRun(o);
+                    runResult = program.RunCommand();
+                })
+                .WithParsed<ExecOptions>(o =>
+                {
+                    using var cmd = new ExecRun(o);
+                    runResult = cmd.RunCommand();
+                });
+
+            if (result.Tag != ParserResultType.Parsed)
+  12 changes: 10 additions & 2 deletions12  
+tools/ArduinoCsCompiler/Hal/ArduinoNativeBoard.cs
+@@ -8,6 +8,7 @@
+using System.Device.Spi;
+using System.Diagnostics.CodeAnalysis;
+using System.Linq;
+using System.Net;
+using System.Text;
+using System.Threading.Tasks;
+using ArduinoCsCompiler.Runtime;
+@@ -18,7 +19,7 @@ namespace ArduinoCsCompiler
+{
+    /// <summary>
+    /// This is the arduino board driver when running on the Arduino/ESP32. It is pretty simple, because
+    /// it represents the actual hardware.
+    /// it represents the board from it's own perspective.
+    /// </summary>
+    [ArduinoReplacement(typeof(ArduinoBoard), true, IncludingPrivates = true)]
+    public class ArduinoNativeBoard : Board
+@@ -27,13 +28,20 @@ public ArduinoNativeBoard()
+        {
+        }
+
+        public static bool TryConnectToNetworkedBoard(System.Net.IPAddress boardAddress, System.Int32 port,
+        public static bool TryConnectToNetworkedBoard(IPAddress boardAddress, int port,
+            [NotNullWhen(true)] out ArduinoBoard board)
+        {
+            board = null!;
+            return false;
+        }
+
+        public static bool TryConnectToNetworkedBoard(IPAddress boardAddress, int port, bool useAutoReconnect,
+            [NotNullWhen(true)] out ArduinoBoard? board)
+        {
+            board = null!;
+            return false;
+        }
+
+        public static bool TryFindBoard(IEnumerable<string> comPorts, IEnumerable<int> baudRates,
+            [NotNullWhen(true)] out ArduinoBoard? board)
+        {
+  153 changes: 150 additions & 3 deletions153  
+tools/ArduinoCsCompiler/Hal/ArduinoNativeGpioDriver.cs
+@@ -6,6 +6,7 @@
+using System.Device.Gpio;
+using System.Text;
+using System.Threading;
+using Iot.Device.Arduino;
+
+namespace ArduinoCsCompiler
+{
+@@ -16,10 +17,15 @@ namespace ArduinoCsCompiler
+    public class ArduinoNativeGpioDriver : GpioDriver
+    {
+        private readonly ArduinoHardwareLevelAccess _hardwareLevelAccess;
+        private readonly Dictionary<int, CallbackContainer> _callbackContainers;
+        private readonly object _callbackContainersLock;
+        private Thread? _callbackThread;
+
+        public ArduinoNativeGpioDriver()
+        {
+            _hardwareLevelAccess = new ArduinoHardwareLevelAccess();
+            _callbackContainersLock = new object();
+            _callbackContainers = new Dictionary<int, CallbackContainer>();
+        }
+
+        protected override int PinCount
+@@ -72,17 +78,158 @@ protected override void Write(int pinNumber, PinValue value)
+
+        protected override WaitForEventResult WaitForEvent(int pinNumber, PinEventTypes eventTypes, CancellationToken cancellationToken)
+        {
+            throw new NotImplementedException();
+            PinValue currentState = Read(pinNumber);
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                PinValue newValue = Read(pinNumber);
+                if (currentState == PinValue.Low && (eventTypes & PinEventTypes.Rising) != 0 && newValue == PinValue.High)
+                {
+                    return new WaitForEventResult()
+                    {
+                        EventTypes = PinEventTypes.Rising
+                    };
+                }
+
+                if (currentState == PinValue.High && (eventTypes & PinEventTypes.Falling) != 0 && newValue == PinValue.Low)
+                {
+                    return new WaitForEventResult()
+                    {
+                        EventTypes = PinEventTypes.Falling
+                    };
+                }
+
+                currentState = newValue;
+            }
+
+            return new WaitForEventResult()
+            {
+                EventTypes = PinEventTypes.None, TimedOut = true
+            };
+        }
+
+        private void WaitForEvents()
+        {
+            while (true)
+            {
+                bool endLoop = false;
+                lock (_callbackContainersLock)
+                {
+                    if (_callbackContainers.Count == 0)
+                    {
+                        endLoop = true;
+                        return;
+                    }
+
+                    foreach (var container in _callbackContainers)
+                    {
+                        PinValue newValue = Read(container.Key);
+                        if (newValue != container.Value.PreviousValue)
+                        {
+                            container.Value.FireOnPinChanged(newValue == PinValue.High ? PinEventTypes.Rising : PinEventTypes.Falling);
+                            container.Value.PreviousValue = newValue;
+                        }
+                    }
+                }
+
+                if (endLoop)
+                {
+                    _callbackThread = null;
+                    return;
+                }
+
+                Thread.Yield();
+            }
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            lock (_callbackContainersLock)
+            {
+                _callbackContainers.Clear(); // So the thread ends
+            }
+
+            base.Dispose(disposing);
+        }
+
+        protected override void AddCallbackForPinValueChangedEvent(int pinNumber, PinEventTypes eventTypes, PinChangeEventHandler callback)
+        {
+            throw new NotImplementedException();
+            lock (_callbackContainersLock)
+            {
+                if (_callbackContainers.Count == 0)
+                {
+                    // Empty: Start the background thread
+                    _callbackThread = new Thread(WaitForEvents);
+                    _callbackThread.Start();
+                }
+
+                if (_callbackContainers.TryGetValue(pinNumber, out var cb))
+                {
+                    cb.EventTypes = cb.EventTypes | eventTypes;
+                    cb.OnPinChanged += callback;
+                }
+                else
+                {
+                    var cb2 = new CallbackContainer(pinNumber, eventTypes);
+                    cb2.OnPinChanged += callback;
+                    cb2.PreviousValue = Read(pinNumber);
+                    _callbackContainers.Add(pinNumber, cb2);
+                }
+            }
+        }
+
+        protected override void RemoveCallbackForPinValueChangedEvent(int pinNumber, PinChangeEventHandler callback)
+        {
+            throw new NotImplementedException();
+            lock (_callbackContainersLock)
+            {
+                if (_callbackContainers.TryGetValue(pinNumber, out var cb))
+                {
+                    cb.OnPinChanged -= callback;
+                    if (cb.NoEventsConnected)
+                    {
+                        _callbackContainers.Remove(pinNumber);
+                    }
+                }
+            }
+        }
+
+        private class CallbackContainer
+        {
+            public CallbackContainer(int pinNumber, PinEventTypes eventTypes)
+            {
+                PinNumber = pinNumber;
+                EventTypes = eventTypes;
+            }
+
+            public event PinChangeEventHandler? OnPinChanged;
+
+            public int PinNumber { get; }
+
+            public PinEventTypes EventTypes
+            {
+                get;
+                set;
+            }
+
+            public PinValue PreviousValue
+            {
+                get;
+                set;
+            }
+
+            public bool NoEventsConnected
+            {
+                get
+                {
+                    return OnPinChanged == null;
+                }
+            }
+
+            public void FireOnPinChanged(PinEventTypes eventType)
+            {
+                // Copy event instance, prevents problems when elements are added or removed at the same time
+                var threadSafeCopy = OnPinChanged;
+                threadSafeCopy?.Invoke(PinNumber, new PinValueChangedEventArgs(eventType, PinNumber));
+            }
+        }
+    }
+}
+  17 changes: 15 additions & 2 deletions17  
+tools/ArduinoCsCompiler/IlCodeParser.cs
+@@ -366,8 +366,21 @@ public static IlCode FindAndPatchTokens(ExecutionSet set, EquatableMethod method
+
+                        fieldsUsed.Add((FieldInfo)set.InverseResolveToken(patchValue)!);
+
+                        // Add the fields' class to the list of used classes, or that one will be missing if the class consists of only fields (rare, but happens)
+                        typesUsed.Add(mb.DeclaringType!.GetTypeInfo());
+                        if (MicroCompiler.HasReplacementAttribute(mb.DeclaringType!, out var attribute) && attribute.ReplaceEntireType == false)
+                        {
+                            // If this _is_ the replacement class already, and we're not replacing the full type, add the original type, or we end up with
+                            // both the original and the replacement types in the execution set.
+                            if (attribute.TypeToReplace != null)
+                            {
+                                typesUsed.Add(attribute.TypeToReplace.GetTypeInfo());
+                            }
+                        }
+                        else
+                        {
+                            // Add the fields' class to the list of used classes, or that one will be missing if the class consists of only fields (rare, but happens)
+                            typesUsed.Add(mb.DeclaringType!.GetTypeInfo());
+                        }
+
+                        break;
+                    }
+
+  7 changes: 5 additions & 2 deletions7  
+tools/ArduinoCsCompiler/KnownTypeTokens.cs
+@@ -5,7 +5,7 @@
+namespace ArduinoCsCompiler
+{
+    /// <summary>
+    /// A set of tokens which is always assigned to these classes, because they need to be identifiable in the firmware, i.e. the token assigned
+    /// A set of tokens which are always assigned to these classes (or methods), because they need to be identifiable in the firmware, i.e. the token assigned
+    /// to "System.Type" is always 2. See GetOrAddClassToken for where this is used.
+    /// </summary>
+    public enum KnownTypeTokens
+@@ -23,6 +23,7 @@ public enum KnownTypeTokens
+        ByReferenceByte = 10,
+        Delegate = 11,
+        MulticastDelegate = 12,
+        Thread = 13,
+        Byte = 19,
+        Int32 = 20,
+        Uint32 = 21,
+@@ -42,7 +43,9 @@ public enum KnownTypeTokens
+        OverflowException = 41,
+        IoException = 42,
+        ArithmeticException = 43,
+        LargestKnownTypeToken = 50,
+        ThreadStartCallback = 50, // The token of Thread.StartCallback(). This is the startup method for new threads.
+        AppDomainTimerCallback = 51, // Used to fire the timer in MiniTimerQueue
+        LargestKnownTypeToken = 52,
+        // If more of these are required, check the ctor of ExecutionSet to make sure enough entries have been reserved
+        IEnumerableOfT = ExecutionSet.GenericTokenStep,
+        SpanOfT = ExecutionSet.GenericTokenStep * 2,
+  47 changes: 42 additions & 5 deletions47  
+tools/ArduinoCsCompiler/MethodFlags.cs
+@@ -8,13 +8,50 @@ namespace ArduinoCsCompiler
+    [Flags]
+    public enum MethodFlags : byte
+    {
+        /// <summary>
+        /// The method has no special properties
+        /// </summary>
+        None = 0,
+
+        /// <summary>
+        /// The method is static
+        /// </summary>
+        Static = 1,
+
+        /// <summary>
+        /// The method is virtual
+        /// </summary>
+        Virtual = 2,
+        SpecialMethod = 4, // Method will resolve to a built-in function on the arduino
+        Void = 8, // The method returns void
+        Ctor = 16, // The method is a ctor (which only implicitly returns "this"); the flag is not set for static ctors.
+        Abstract = 32, // The method is abstract (or an interface stub)
+        ExceptionClausesPresent = 64, // The method has at least one exception clause
+
+        /// <summary>
+        /// Method will resolve to a built-in function on the arduino
+        /// </summary>
+        SpecialMethod = 4,
+
+        /// <summary>
+        /// The method returns void
+        /// </summary>
+        Void = 8,
+
+        /// <summary>
+        /// The method is a constructor, which only implicitly returns "this".
+        /// The flag is not used on static ctors, these are handled like an ordinary static method
+        /// </summary>
+        Ctor = 16,
+
+        /// <summary>
+        /// The method is abstract or an interface declaration
+        /// </summary>
+        Abstract = 32,
+
+        /// <summary>
+        /// The method has at least one exception clause
+        /// </summary>
+        ExceptionClausesPresent = 64,
+
+        /// <summary>
+        /// The method is synchronized (implicitly locked on call)
+        /// </summary>
+        Synchronized = 128,
+    }
+}
+ 614 changes: 415 additions & 199 deletions614  
+tools/ArduinoCsCompiler/MicroCompiler.cs
+Large diffs are not rendered by default.
+
+  23 changes: 23 additions & 0 deletions23  
+tools/ArduinoCsCompiler/README.md
+@@ -167,3 +167,26 @@ extern caddr_t _sbrk (int incr) {
+    return (caddr_t) prev_heap ;
+}
+```
+## Compiler Diagnostics
+This is an incomplete list of error and warning messages from the Arduino Compiler (ACS).
+Note that the compiler will not output source file information, since it operates directly on the binary file. It only "knows" of methods and classes.
+ACS0001: Internal compiler error
+: Instead of this error, you'll probably get an exception.
+ACS0002: This compiler is currently supported on Windows only. The target CPU may be anything, but the compiler is only tested on Windows. You might experience build or runtime failures otherwise.
+: The Arduino Compiler is currently only supported on windows. The runtime replicates parts of the low-level system calls, and hence depends on the operating system the compiler runs on.
+ACS0003: Could not find file {FileName}. (Looking at absolute path {Path})
+: The input file could not be found.
+ACS0004, {methodInfo.MethodSignature()} has no visible implementation
+: The given low-level method is not implemented in the runtime. If the method is actually used in the program, a run-time error will occur.
+ACS0006, Method {methodInfo.MemberInfoSignature()} has [MethodImpl(MethodImplAttributes.Synchronized)] and is static. This is not supported.
+: Don't use `[MethodImpl(MethodImplAttributes.Synchronized)]` on static methods (and generally, by the way).
+ACS0007: Should have a replacement for {original.MethodSignature()}, but it is missing. Caller: {callingMethod.MethodSignature()}. Original implementation is in {original.DeclaringType!.AssemblyQualifiedName}
+: This error means that the Arduino Runtime is missing a required replacement method. A replacement method is a low-level call that needs to be provided by the firmware (because the original method doesn't work on the microcontroller)
+  2 changes: 1 addition & 1 deletion2  
+tools/ArduinoCsCompiler/Runtime/MiniArray.cs
+@@ -6,7 +6,7 @@
+using System.Collections.Generic;
+using Iot.Device.Arduino;
+
+#pragma warning disable CA2208 // Use arguments for ArgumentExceptions
+#pragma warning disable CA2208 // ArgumentException should be used with proper parameters (No: Saves memory)
+namespace ArduinoCsCompiler.Runtime
+{
+    [ArduinoReplacement(typeof(System.Array), false, IncludingPrivates = true)]
+  2 changes: 1 addition & 1 deletion2  
+tools/ArduinoCsCompiler/Runtime/MiniBuffer.cs
+@@ -121,7 +121,7 @@ public static unsafe void MemoryCopy(void* source, void* destination, System.Int
+        {
+            if (destinationSizeInBytes < sourceBytesToCopy)
+            {
+                throw new ArgumentOutOfRangeException(nameof(destinationSizeInBytes));
+                throw new ArgumentOutOfRangeException(nameof(sourceBytesToCopy));
+            }
+
+            Memmove((byte*)destination, (byte*)source, (uint)sourceBytesToCopy);
+  5 changes: 0 additions & 5 deletions5  
+tools/ArduinoCsCompiler/Runtime/MiniCompareInfo.cs
+@@ -10,11 +10,6 @@ namespace ArduinoCsCompiler.Runtime
+    [ArduinoReplacement(typeof(CompareInfo), false, IncludingPrivates = true)]
+    internal class MiniCompareInfo
+    {
+        [ArduinoImplementation]
+        public void IcuInitSortHandle()
+        {
+        }
+
+        [ArduinoImplementation]
+        public int IcuCompareString(ReadOnlySpan<char> string1, ReadOnlySpan<char> string2, CompareOptions options)
+        {
+ 24 changes: 24 additions & 0 deletions24  
+tools/ArduinoCsCompiler/Runtime/MiniConsole.cs
+@@ -0,0 +1,24 @@
+﻿// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace ArduinoCsCompiler.Runtime
+{
+    [ArduinoReplacement(typeof(System.Console))]
+    internal class MiniConsole
+    {
+        public static bool KeyAvailable
+        {
+            [ArduinoImplementation]
+            get
+            {
+                return false;
+            }
+        }
+    }
+}
+  25 changes: 20 additions & 5 deletions25  
+tools/ArduinoCsCompiler/Runtime/MiniCultureInfo.cs
+@@ -78,6 +78,8 @@ internal class MiniCultureInfo : IFormatProvider, ICloneable
+        // The culture used in the user interface. This is mostly used to load correct localized resources.
+        private static volatile MiniCultureInfo? s_userDefaultUICulture;
+
+        private static volatile TextInfo s_textInfo = MiniUnsafe.As<TextInfo>(new MiniTextInfo());
+
+        private bool _isReadOnly;
+        internal NumberFormatInfo? _numInfo;
+        internal DateTimeFormatInfo? _dateTimeInfo;
+@@ -267,7 +269,7 @@ internal static bool VerifyCultureName(string cultureName, bool throwException)
+
+                if (throwException)
+                {
+                    throw new ArgumentException("Invalid culture name", nameof(cultureName));
+                    throw new ArgumentException(cultureName, nameof(cultureName));
+                }
+
+                return false;
+@@ -467,7 +469,7 @@ public virtual string DisplayName
+        /// <summary>
+        /// Gets the CompareInfo for this culture.
+        /// </summary>
+        public virtual MiniCompareInfo CompareInfo => new MiniCompareInfo(this);
+        public virtual CompareInfo CompareInfo => MiniUnsafe.As<CompareInfo>(new MiniCompareInfo(this));
+
+        /// <summary>
+        /// Gets the TextInfo for this culture.
+@@ -476,7 +478,7 @@ public virtual TextInfo TextInfo
+        {
+            get
+            {
+                return null!;
+                return s_textInfo;
+            }
+        }
+
+@@ -487,11 +489,17 @@ public override bool Equals(object? value)
+                return true;
+            }
+
+            if (value == null)
+            {
+                return false;
+            }
+
+            if (value is CultureInfo that)
+            {
+                // using CompareInfo to verify the data passed through the constructor
+                // CultureInfo(String cultureName, String textAndCompareCultureName)
+                return Name.Equals(that.Name) && CompareInfo.Equals(that.CompareInfo);
+                bool ret = Name.Equals(that.Name);
+                return ret;
+            }
+
+            return false;
+@@ -1127,6 +1135,12 @@ private static string GetShortTimePattern()
+                return CultureInfo.CurrentCulture.DateTimeFormat.ShortTimePattern;
+            }
+
+            [ArduinoCompileTimeConstant]
+            private static string GetShortDatePattern()
+            {
+                return CultureInfo.CurrentCulture.DateTimeFormat.ShortDatePattern;
+            }
+
+            public void GetDateTimeFormat(DateTimeFormatInfo dateTimeInfo)
+            {
+                dateTimeInfo.MonthNames = _saMonthNames;
+@@ -1136,7 +1150,8 @@ public void GetDateTimeFormat(DateTimeFormatInfo dateTimeInfo)
+                dateTimeInfo.FullDateTimePattern = GetFullDateTimePattern();
+                dateTimeInfo.LongTimePattern = GetLongTimePattern();
+                dateTimeInfo.ShortTimePattern = GetShortTimePattern();
+                dateTimeInfo.ShortDatePattern = GetShortTimePattern();
+                dateTimeInfo.LongDatePattern = GetLongDatePattern();
+                dateTimeInfo.ShortDatePattern = GetShortDatePattern();
+            }
+        }
+
+  5 changes: 2 additions & 3 deletions5  
+tools/ArduinoCsCompiler/Runtime/MiniEnum.cs
+@@ -54,7 +54,7 @@ private static MiniType ValidateRuntimeType(Type enumType)
+
+            if (!enumType.IsEnum)
+            {
+                throw new ArgumentException("Type is not an enum", nameof(enumType));
+                throw new ArgumentException("Invalid argument", nameof(enumType));
+            }
+
+            return MiniUnsafe.As<MiniType>(enumType);
+@@ -116,8 +116,7 @@ public override bool Equals(object? obj)
+                return false;
+            }
+
+            UInt64 other = (UInt64)obj;
+            return ToUInt64() == other;
+            return MiniRuntimeHelpers.EnumEqualsInternal(this, obj);
+        }
+    }
+}
+  4 changes: 2 additions & 2 deletions4  
+tools/ArduinoCsCompiler/Runtime/MiniInterop.Console.cs
+@@ -51,9 +51,9 @@ internal static bool IsGetConsoleModeCallSuccessful(IntPtr handle)
+            }
+
+            [ArduinoImplementation("Kernel32_WriteConsole")]
+            internal static unsafe Int32 WriteConsole(System.IntPtr handle, System.Byte* bytes, System.Int32 numBytesToWrite, ref System.Int32 numBytesWritten, System.IntPtr mustBeZero)
+            internal static unsafe bool WriteConsole(System.IntPtr handle, System.Byte* bytes, System.Int32 numBytesToWrite, ref System.Int32 numBytesWritten, System.IntPtr mustBeZero)
+            {
+                return 0;
+                return true;
+            }
+
+            [ArduinoImplementation("Kernel32_WideCharToMultiByte")]
+  31 changes: 29 additions & 2 deletions31  
+tools/ArduinoCsCompiler/Runtime/MiniInterop.Kernel32.cs
+@@ -9,6 +9,7 @@
+using Iot.Device.Arduino;
+using Microsoft.Win32.SafeHandles;
+
+#pragma warning disable CA1416 // Function is only available on Windows (Oh, well, what a coincidence that we're mimicking the windows kernel here...)
+namespace ArduinoCsCompiler.Runtime
+{
+    internal partial class MiniInterop
+@@ -32,6 +33,19 @@ internal static partial class Kernel32
+            internal const uint LOCALE_RETURN_NUMBER = 0x20000000;
+            internal const uint LOCALE_NOUSEROVERRIDE = 0x80000000;
+
+            [ArduinoImplementation(CompareByParameterNames = true)]
+            public static unsafe bool GetThreadIOPendingFlag(System.IntPtr hThread, out bool lpIOIsPending)
+            {
+                lpIOIsPending = false;
+                return true;
+            }
+
+            [ArduinoImplementation("Interop_Kernel32GetCurrentThreadNative")]
+            public static int GetCurrentThread()
+            {
+                return 1;
+            }
+
+            public static unsafe uint GetFullPathNameW(ref Char lpFileName, UInt32 nBufferLength, ref Char lpBuffer, IntPtr lpFilePart)
+            {
+                throw new NotImplementedException();
+@@ -319,8 +333,14 @@ internal static unsafe Int32 WriteFile(SafeHandle handle, Byte* bytes, Int32 num
+                return 1;
+            }
+
+            [ArduinoImplementation("Interop_Kernel32WriteFileOverlapped2", 0x210)]
+            [ArduinoImplementation]
+            internal static unsafe Int32 WriteFile(System.Runtime.InteropServices.SafeHandle handle, Byte* bytes, System.Int32 numBytesToWrite, ref System.Int32 numBytesWritten, NativeOverlapped* lpOverlapped)
+            {
+                return WriteFile(handle.DangerousGetHandle(), bytes, numBytesToWrite, ref numBytesWritten, lpOverlapped->OffsetLow);
+            }
+
+            [ArduinoImplementation("Interop_Kernel32WriteFileOverlapped2", 0x210)]
+            internal static unsafe Int32 WriteFile(IntPtr handle, Byte* bytes, System.Int32 numBytesToWrite, ref System.Int32 numBytesWritten, Int32 offset)
+            {
+                return 0;
+            }
+@@ -347,6 +367,7 @@ internal static unsafe Int32 ReadFile(System.Runtime.InteropServices.SafeHandle
+                return false;
+            }
+
+            // TODO: Probably better rewrite managed
+            [ArduinoImplementation("Interop_Kernel32CreateEventEx", 0x213)]
+            internal static IntPtr CreateEventExInternal(string name, uint flags, uint desiredAccess)
+            {
+@@ -440,8 +461,14 @@ internal static Boolean FlushFileBuffers(System.Runtime.InteropServices.SafeHand
+                return false;
+            }
+
+            [ArduinoImplementation("Interop_Kernel32GetFileInformationByHandleEx", 0x20E)]
+            [ArduinoImplementation]
+            internal static unsafe Boolean GetFileInformationByHandleEx(Microsoft.Win32.SafeHandles.SafeFileHandle hFile, System.Int32 FileInformationClass, void* lpFileInformation, System.UInt32 dwBufferSize)
+            {
+                return GetFileInformationByHandleExInternal(hFile.DangerousGetHandle(), FileInformationClass, lpFileInformation, dwBufferSize);
+            }
+
+            [ArduinoImplementation("Interop_Kernel32GetFileInformationByHandleEx", 0x20E)]
+            public static unsafe Boolean GetFileInformationByHandleExInternal(IntPtr hFile, System.Int32 FileInformationClass, void* lpFileInformation, System.UInt32 dwBufferSize)
+            {
+                return false;
+            }
+ 47 changes: 47 additions & 0 deletions47  
+tools/ArduinoCsCompiler/Runtime/MiniLowLevelLock.cs
+@@ -0,0 +1,47 @@
+﻿// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace ArduinoCsCompiler.Runtime
+{
+    /// <summary>
+    /// A lightweight non-recursive mutex. Waits on this lock are uninterruptible (from Thread.Interrupt(), which is supported
+    /// in some runtimes). That is the main reason this lock type would be used over interruptible locks, such as in a
+    /// low-level-infrastructure component that was historically not susceptible to a pending interrupt, and for compatibility
+    /// reasons, to ensure that it still would not be susceptible after porting that component to managed code.
+    /// </summary>
+    [ArduinoReplacement("System.Threading.LowLevelLock", "System.Private.Corelib.dll", replaceEntireType: true, typeInSameAssembly: typeof(System.String))]
+    internal sealed class MiniLowLevelLock : IDisposable
+    {
+        private object _lock;
+        public MiniLowLevelLock()
+        {
+            _lock = new object();
+        }
+
+        public void Acquire()
+        {
+            MiniMonitor.Enter(_lock);
+        }
+
+        public void Release()
+        {
+            MiniMonitor.Exit(_lock);
+        }
+
+        public bool TryAcquire()
+        {
+            return MiniMonitor.TryEnter(_lock, 0);
+        }
+
+        public void Dispose()
+        {
+            MiniMonitor.Exit(_lock);
+        }
+    }
+}
+  28 changes: 25 additions & 3 deletions28  
+tools/ArduinoCsCompiler/Runtime/MiniMonitor.cs
+@@ -13,9 +13,10 @@ namespace ArduinoCsCompiler.Runtime
+    [ArduinoReplacement(typeof(Monitor), true)]
+    internal class MiniMonitor
+    {
+        [ArduinoImplementation("MonitorEnter")]
+        [ArduinoImplementation]
+        public static void Enter(Object o)
+        {
+            Monitor.TryEnter(o, -1);
+        }
+
+        [ArduinoImplementation]
+@@ -28,22 +29,43 @@ public static void Enter(Object o, ref bool lockTaken)
+        [ArduinoImplementation("MonitorExit")]
+        public static void Exit(Object o)
+        {
+            throw new NotImplementedException();
+        }
+
+        public static void PulseAll(Object o)
+        {
+            // No op
+            // Simplistic implementation: don't do anything.
+            // Should work because at the moment we have a fair scheduler (note that this is called while the calling thread still owns the lock)
+        }
+
+        [ArduinoImplementation]
+        public static void Pulse(Object o)
+        {
+            // No op
+            PulseAll(o);
+        }
+
+        [ArduinoImplementation("MonitorWait")]
+        public static bool Wait(Object obj, Int32 millisecondsTimeout)
+        {
+            throw new NotImplementedException();
+        }
+
+        [ArduinoImplementation("MonitorTryEnter")]
+        public static bool TryEnter(object obj, Int32 millisecondsTimeout)
+        {
+            throw new NotImplementedException();
+        }
+
+        [ArduinoImplementation]
+        public static bool TryEnter(object obj, Int32 millisecondsTimeout, ref bool lockTaken)
+        {
+            if (TryEnter(obj, millisecondsTimeout))
+            {
+                lockTaken = true;
+                return true;
+            }
+
+            return false;
+        }
+    }
+}
+  16 changes: 12 additions & 4 deletions16  
+tools/ArduinoCsCompiler/Runtime/MiniRuntimeHelpers.cs
+@@ -57,18 +57,26 @@ private static bool IsReferenceOrContainsReferencesCore(Type t)
+        /// <summary>
+        /// This uses an implementation in the EE to get rid of all type tests (and all possible casts)
+        /// </summary>
+        [ArduinoImplementation("RuntimeHelpersEnumEquals")]
+        [ArduinoImplementation("RuntimeHelpersEnumEquals", IgnoreGenericTypes = true)]
+        public static bool EnumEquals<T>(T x, T y)
+            where T : struct, Enum
+        {
+            return x.Equals(y);
+            // return x.Equals(y);
+            throw new NotImplementedException();
+        }
+
+        [ArduinoImplementation("RuntimeHelpersEnumCompareTo")]
+        [ArduinoImplementation("RuntimeHelpersEnumEqualsInternal")]
+        public static bool EnumEqualsInternal(object x, object y)
+        {
+            throw new NotSupportedException();
+        }
+
+        [ArduinoImplementation("RuntimeHelpersEnumCompareTo", IgnoreGenericTypes = true)]
+        internal static int EnumCompareTo<T>(T x, T y)
+            where T : struct, Enum
+        {
+            return x.CompareTo((object)y);
+            // return x.CompareTo((object)y);
+            throw new NotImplementedException();
+        }
+
+        internal static bool IsBitwiseEquatable<T>()
+  49 changes: 49 additions & 0 deletions49  
+tools/ArduinoCsCompiler/Runtime/MiniSpanHelpers.T.cs
+@@ -12,6 +12,55 @@ namespace ArduinoCsCompiler.Runtime
+{
+    internal static partial class MiniSpanHelpers // .T
+    {
+        public static void Fill<T>(ref T refData, nuint numElements, T value)
+        {
+            // If we reached this point, we cannot vectorize this T, or there are too few
+            // elements for us to vectorize. Fall back to an unrolled loop.
+            nuint i = 0;
+
+            // Write 8 elements at a time
+            if (numElements >= 8)
+            {
+                nuint stopLoopAtOffset = numElements & ~(nuint)7;
+                do
+                {
+                    Unsafe.Add(ref refData, (nint)i + 0) = value;
+                    Unsafe.Add(ref refData, (nint)i + 1) = value;
+                    Unsafe.Add(ref refData, (nint)i + 2) = value;
+                    Unsafe.Add(ref refData, (nint)i + 3) = value;
+                    Unsafe.Add(ref refData, (nint)i + 4) = value;
+                    Unsafe.Add(ref refData, (nint)i + 5) = value;
+                    Unsafe.Add(ref refData, (nint)i + 6) = value;
+                    Unsafe.Add(ref refData, (nint)i + 7) = value;
+                }
+                while ((i += 8) < stopLoopAtOffset);
+            }
+
+            // Write next 4 elements if needed
+            if ((numElements & 4) != 0)
+            {
+                Unsafe.Add(ref refData, (nint)i + 0) = value;
+                Unsafe.Add(ref refData, (nint)i + 1) = value;
+                Unsafe.Add(ref refData, (nint)i + 2) = value;
+                Unsafe.Add(ref refData, (nint)i + 3) = value;
+                i += 4;
+            }
+
+            // Write next 2 elements if needed
+            if ((numElements & 2) != 0)
+            {
+                Unsafe.Add(ref refData, (nint)i + 0) = value;
+                Unsafe.Add(ref refData, (nint)i + 1) = value;
+                i += 2;
+            }
+
+            // Write final element if needed
+            if ((numElements & 1) != 0)
+            {
+                Unsafe.Add(ref refData, (nint)i) = value;
+            }
+        }
+
+        public static int IndexOf<T>(ref T searchSpace, int searchSpaceLength, ref T value, int valueLength)
+            where T : IEquatable<T>
+        {
+  74 changes: 67 additions & 7 deletions74  
+tools/ArduinoCsCompiler/Runtime/MiniThread.cs
+@@ -10,13 +10,21 @@ namespace ArduinoCsCompiler.Runtime
+    [ArduinoReplacement(typeof(System.Threading.Thread), false, IncludingPrivates = true)]
+    internal class MiniThread
+    {
+#pragma warning disable 414
+#pragma warning disable 414, SA1306
+        private IntPtr _DONT_USE_InternalThread;
+        private int _managedThreadId;
+        private ExecutionContext? _executionContext;
+#pragma warning restore 414
+        private SynchronizationContext? _synchronizationContext;
+        private string _name;
+#pragma warning restore 414, SA1306
+
+        public MiniThread()
+        {
+            _executionContext = null;
+            _DONT_USE_InternalThread = IntPtr.Zero;
+            _managedThreadId = 0;
+            _synchronizationContext = null;
+            _name = string.Empty;
+        }
+
+        /// <summary>
+@@ -43,13 +51,15 @@ public static void Sleep(int delayMs)
+                while (previous < ticks)
+                {
+                    previous = ticks;
+                    Yield();
+                    ticks = Environment.TickCount;
+                }
+            }
+
+            while (endTicks > ticks)
+            {
+                // Busy waiting is ok here - the microcontroller has no sleep state
+                Yield();
+                ticks = Environment.TickCount;
+            }
+        }
+@@ -68,20 +78,43 @@ public int ManagedThreadId
+            [ArduinoImplementation]
+            get
+            {
+                return 1;
+                return _managedThreadId;
+            }
+        }
+
+        public bool IsThreadPoolThread
+        {
+            // The backend doesn't do much with this field, but if we implement it here,
+            // we need to add it's backing field to the class, which would require some
+            // special handling
+            [ArduinoImplementation("Thread_get_IsThreadPoolThread")]
+            get;
+
+            [ArduinoImplementation("Thread_set_IsThreadPoolThread")]
+            set;
+        }
+
+        public bool IsBackground
+        {
+            // The backend doesn't do much with this field, but if we implement it here,
+            // we need to add it's backing field to the class, which would require some
+            // special handling
+            [ArduinoImplementation("Thread_get_IsBackground")]
+            get;
+
+            [ArduinoImplementation("Thread_set_IsBackground")]
+            set;
+        }
+
+        [ArduinoImplementation]
+        public static void Sleep(TimeSpan delay)
+        {
+            Sleep((int)delay.TotalMilliseconds);
+        }
+
+        [ArduinoImplementation]
+        [ArduinoImplementation("ThreadYield")]
+        public static bool Yield()
+        {
+            // We are running in a single-thread environment, so this is effectively a no-op
+            return false;
+        }
+
+@@ -103,10 +136,37 @@ public static int GetCurrentProcessorNumber()
+            return 0;
+        }
+
+        [ArduinoImplementation]
+        [ArduinoImplementation("ThreadGetCurrentThreadNative")]
+        public static Thread GetCurrentThreadNative()
+        {
+            return MiniUnsafe.As<Thread>(new MiniThread());
+            throw new NotImplementedException();
+        }
+
+        /// <summary>
+        /// First arg is of type ThreadHandle, but this is a value type over an IntPtr, so their layout is identical
+        /// </summary>
+        [ArduinoImplementation("ThreadStartInternal", CompareByParameterNames = true)]
+        public static unsafe void StartInternal(IntPtr t, int stackSize, int priority, char* pThreadName)
+        {
+            throw new NotImplementedException();
+        }
+
+        [ArduinoImplementation("ThreadInitialize")]
+        public void Initialize()
+        {
+            throw new NotImplementedException();
+        }
+
+        [ArduinoImplementation("ThreadJoin")]
+        public bool Join(int millisecondsTimeout)
+        {
+            throw new NotImplementedException();
+        }
+
+        [ArduinoImplementation]
+        public void SetThreadPoolWorkerThreadName()
+        {
+            // Nothing to do, really (we don't keep thread names)
+        }
+    }
+}
+ 157 changes: 157 additions & 0 deletions157  
+tools/ArduinoCsCompiler/Runtime/MiniTimerQueue.cs
+@@ -0,0 +1,157 @@
+﻿// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+
+#pragma warning disable SX1309 // Inconsistent naming (names must match the CLR)
+namespace ArduinoCsCompiler.Runtime
+{
+    [ArduinoReplacement("System.Threading.TimerQueue", "System.Private.Corelib.dll", false, typeof(string), IncludingPrivates = true)]
+    internal class MiniTimerQueue
+    {
+        // Implementation partially copied from the CLR, minus debugging stuff and minus native timers
+        private int _id;
+        private FireAfterTimeout? m_appDomainTimer;
+        // The current threshold, an absolute time where any timers scheduled to go off at or
+        // before this time must be queued to the short list.
+        private long _currentAbsoluteThreshold = Environment.TickCount64 + 333;
+
+        private object? _shortTimers; // Actual type: TimerQueueTimer
+        private object? _longTimers;
+
+        private bool _isTimerScheduled;
+        private long _currentTimerStartTicks;
+        private uint _currentTimerDuration;
+
+        private MiniTimerQueue(int id)
+        {
+            _id = id;
+            _shortTimers = null;
+            _longTimers = null;
+            _isTimerScheduled = false;
+            _currentTimerStartTicks = 0;
+            _currentTimerDuration = 0;
+            _shortTimers = null;
+            _longTimers = null;
+        }
+
+        public static MiniTimerQueue[] Instances { get; } = CreateTimerQueues();
+
+        private static MiniTimerQueue[] CreateTimerQueues()
+        {
+            var queues = new MiniTimerQueue[Environment.ProcessorCount];
+            for (int i = 0; i < queues.Length; i++)
+            {
+                queues[i] = new MiniTimerQueue(i);
+            }
+
+            return queues;
+        }
+
+        public long ActiveCount { get; private set; }
+
+        /// <summary>
+        /// This method internally calls back on AppDomainTimerCallback(int) from the C# implementation
+        /// </summary>
+        [ArduinoImplementation("MiniTimerQueueFireCallback", InternalCall = true)]
+        public static void FireTimerInternal(int id)
+        {
+            throw new NotImplementedException();
+        }
+
+        [ArduinoImplementation]
+        public bool SetTimer(uint actualDuration)
+        {
+            lock (this)
+            {
+                if (m_appDomainTimer == null || m_appDomainTimer.Done)
+                {
+                    m_appDomainTimer = new FireAfterTimeout(actualDuration, _id);
+                    return true;
+                }
+                else
+                {
+                    m_appDomainTimer.Duration = actualDuration;
+                    return true;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Dummy method to suppress warnings (not referenced!)
+        /// </summary>
+        /// <returns></returns>
+        public bool DummyUseFields()
+        {
+            if (_isTimerScheduled)
+            {
+                var end = _currentTimerStartTicks + _currentTimerDuration;
+                return end > 0;
+            }
+
+            return _shortTimers != null && _longTimers != null;
+        }
+
+        private class FireAfterTimeout
+        {
+            private int _id;
+            private Thread _thread;
+            private bool _aborted;
+            public FireAfterTimeout(uint duration, int id)
+            {
+                Duration = duration;
+                _id = id;
+                _aborted = false;
+                Done = false;
+                StartTime = Environment.TickCount64;
+                _thread = new Thread(WaitUntilFire);
+                _thread.Start();
+            }
+
+            public uint Duration
+            {
+                get;
+                set;
+            }
+
+            private long StartTime
+            {
+                get;
+            }
+
+            public bool Done
+            {
+                get;
+                private set;
+            }
+
+            public void Abort()
+            {
+                _aborted = true;
+                _thread.Join();
+            }
+
+            private void WaitUntilFire()
+            {
+                // This way, any change of duration will immediately have an impact
+                while (StartTime + Duration > Environment.TickCount64)
+                {
+                    if (_aborted)
+                    {
+                        return;
+                    }
+
+                    Thread.Yield();
+                }
+
+                Done = true;
+                MiniTimerQueue.FireTimerInternal(_id);
+            }
+        }
+    }
+}
+  60 changes: 58 additions & 2 deletions60  
+tools/ArduinoCsCompiler/Runtime/MiniType.cs
+@@ -11,11 +11,10 @@ namespace ArduinoCsCompiler.Runtime
+    internal class MiniType
+    {
+        public static readonly Type[] EmptyTypes = new Type[0];
+#pragma warning disable 414, SX1309
+#pragma warning disable SX1309
+        // This is used by firmware code directly. Do not reorder the members without checking the firmware
+        // The member contains the token of the class declaration
+        private Int32 m_handle;
+#pragma warning restore 414
+
+        [ArduinoImplementation("TypeCtor", 0x50)]
+        protected MiniType()
+@@ -33,6 +32,18 @@ public virtual bool IsGenericType
+            }
+        }
+
+        /// <summary>
+        /// This returns true for an open generic type only
+        /// </summary>
+        public virtual bool IsGenericTypeDefinition
+        {
+            [ArduinoImplementation("TypeIsGenericTypeDefinition", 235)]
+            get
+            {
+                return (m_handle & ExecutionSet.GenericTokenMask) != 0;
+            }
+        }
+
+        public virtual bool IsEnum
+        {
+            [ArduinoImplementation("TypeIsEnum", 0x51)]
+@@ -102,6 +113,23 @@ public virtual Type BaseType
+            }
+        }
+
+        public virtual Type[] GenericTypeArguments
+        {
+            get
+            {
+                return (IsGenericType && !IsGenericTypeDefinition) ? GetGenericArguments() : Type.EmptyTypes;
+            }
+        }
+
+        public virtual Type[] GenericTypeParameters
+        {
+            [ArduinoImplementation("TypeGetGenericTypeParameters", 233)]
+            get
+            {
+                return new Type[0];
+            }
+        }
+
+        public System.Reflection.MethodInfo GetMethod(System.String name)
+        {
+            throw new NotSupportedException();
+@@ -282,6 +310,34 @@ public virtual bool IsEquivalentTo(Type other)
+            return Equals(other);
+        }
+
+        [ArduinoImplementation("TypeGetArrayRank", 234)]
+        public virtual int GetArrayRank()
+        {
+            return 1;
+        }
+
+        public MethodInfo? GetMethod(string name, Type[] types)
+        {
+            throw new PlatformNotSupportedException(name);
+        }
+
+        public MethodInfo? GetMethod(string name, BindingFlags bindingAttr)
+        {
+            throw new PlatformNotSupportedException(name);
+        }
+
+        [ArduinoImplementation("TypeGetFields")]
+        public FieldInfo[]? GetFields(BindingFlags bindingAttr)
+        {
+            return null;
+        }
+
+        [ArduinoImplementation("TypeGetProperties")]
+        public virtual PropertyInfo[]? GetProperties(BindingFlags bindingFlags)
+        {
+            return null;
+        }
+
+        public virtual Array GetEnumValues()
+        {
+            if (!IsEnum)
+ 180 changes: 180 additions & 0 deletions180  
+tools/ArduinoCsCompiler/Runtime/MiniVector128.cs
+@@ -0,0 +1,180 @@
+﻿// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+
+using System;
+using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
+using System.Diagnostics;
+using System.Globalization;
+using System.Linq;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics.X86;
+using System.Runtime.Intrinsics;
+using System.Text;
+using System.Threading.Tasks;
+
+#pragma warning disable SA1306 // Naming convention
+#pragma warning disable SA1204 // Method ordering
+
+namespace ArduinoCsCompiler.Runtime
+{
+    [StructLayout(LayoutKind.Sequential, Size = 16)]
+    public readonly struct Vector128<T> : IEquatable<Vector128<T>>
+        where T : struct
+    {
+        // These fields exist to ensure the alignment is 8, rather than 1.
+        // This also allows the debug view to work https://github.com/dotnet/runtime/issues/9495)
+        private readonly ulong _00;
+        private readonly ulong _01;
+
+        public Vector128(ulong f1, ulong f2)
+        {
+            _00 = f1;
+            _01 = f2;
+        }
+
+        /// <summary>Gets the number of <typeparamref name="T" /> that are in a <see cref="Vector128{T}" />.</summary>
+        /// <exception cref="NotSupportedException">The type of the current instance (<typeparamref name="T" />) is not supported.</exception>
+        public static int Count
+        {
+            get
+            {
+                return 16 / Unsafe.SizeOf<T>();
+            }
+        }
+
+        /// <summary>Gets a new <see cref="Vector128{T}" /> with all elements initialized to zero.</summary>
+        /// <exception cref="NotSupportedException">The type of the current instance (<typeparamref name="T" />) is not supported.</exception>
+        public static Vector128<T> Zero
+        {
+            get
+            {
+                return default;
+            }
+        }
+
+        /// <summary>Gets a new <see cref="Vector128{T}" /> with all bits set to 1.</summary>
+        /// <exception cref="NotSupportedException">The type of the current instance (<typeparamref name="T" />) is not supported.</exception>
+        public static Vector128<T> AllBitsSet
+        {
+            get
+            {
+                Vector128<T> newVector = new Vector128<T>(UInt64.MaxValue, UInt64.MaxValue);
+                return newVector;
+            }
+        }
+
+        internal string DisplayString
+        {
+            get
+            {
+                if (IsSupported)
+                {
+                    return ToString();
+                }
+                else
+                {
+                    return string.Empty;
+                }
+            }
+        }
+
+        internal static bool IsSupported
+        {
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            get => (typeof(T) == typeof(byte)) ||
+                   (typeof(T) == typeof(sbyte)) ||
+                   (typeof(T) == typeof(short)) ||
+                   (typeof(T) == typeof(ushort)) ||
+                   (typeof(T) == typeof(int)) ||
+                   (typeof(T) == typeof(uint)) ||
+                   (typeof(T) == typeof(long)) ||
+                   (typeof(T) == typeof(ulong)) ||
+                   (typeof(T) == typeof(float)) ||
+                   (typeof(T) == typeof(double));
+        }
+
+        /// <summary>Determines whether the specified <see cref="Vector128{T}" /> is equal to the current instance.</summary>
+        /// <param name="other">The <see cref="Vector128{T}" /> to compare with the current instance.</param>
+        /// <returns><c>true</c> if <paramref name="other" /> is equal to the current instance; otherwise, <c>false</c>.</returns>
+        /// <exception cref="NotSupportedException">The type of the current instance (<typeparamref name="T" />) is not supported.</exception>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public bool Equals(Vector128<T> other)
+        {
+            return SoftwareFallback(in this, other);
+
+            static bool SoftwareFallback(in Vector128<T> vector, Vector128<T> other)
+            {
+                for (int i = 0; i < Count; i++)
+                {
+                    if (!((IEquatable<T>)(GetElement(vector, i))).Equals(GetElement(other, i)))
+                    {
+                        return false;
+                    }
+                }
+
+                return true;
+            }
+        }
+
+        /// <summary>Determines whether the specified object is equal to the current instance.</summary>
+        /// <param name="obj">The object to compare with the current instance.</param>
+        /// <returns><c>true</c> if <paramref name="obj" /> is a <see cref="Vector128{T}" /> and is equal to the current instance; otherwise, <c>false</c>.</returns>
+        /// <exception cref="NotSupportedException">The type of the current instance (<typeparamref name="T" />) is not supported.</exception>
+        public override bool Equals([NotNullWhen(true)] object? obj)
+        {
+            return (obj is Vector128<T>) && Equals((Vector128<T>)(obj));
+        }
+
+        public static T1 GetElement<T1>(Vector128<T1> vector, int index)
+            where T1 : struct
+        {
+            if ((uint)(index) >= (uint)(Vector128<T1>.Count))
+            {
+                throw new ArgumentOutOfRangeException(nameof(index));
+            }
+
+            ref T1 e0 = ref Unsafe.As<Vector128<T1>, T1>(ref vector);
+            return Unsafe.Add(ref e0, index);
+        }
+
+        /// <summary>Gets the hash code for the instance.</summary>
+        /// <returns>The hash code for the instance.</returns>
+        /// <exception cref="NotSupportedException">The type of the current instance (<typeparamref name="T" />) is not supported.</exception>
+        public override int GetHashCode()
+        {
+            HashCode hashCode = default;
+
+            for (int i = 0; i < Count; i++)
+            {
+                hashCode.Add(GetElement(this, i).GetHashCode());
+            }
+
+            return hashCode.ToHashCode();
+        }
+
+        /// <summary>Converts the current instance to an equivalent string representation.</summary>
+        /// <returns>An equivalent string representation of the current instance.</returns>
+        /// <exception cref="NotSupportedException">The type of the current instance (<typeparamref name="T" />) is not supported.</exception>
+        public override string ToString()
+        {
+            int lastElement = Count - 1;
+            var sb = new StringBuilder();
+            CultureInfo invariant = CultureInfo.InvariantCulture;
+
+            sb.Append('<');
+            for (int i = 0; i < lastElement; i++)
+            {
+                sb.Append(((IFormattable)GetElement(this, i)).ToString("G", invariant));
+                sb.Append(',');
+                sb.Append(' ');
+            }
+
+            sb.Append(((IFormattable)GetElement(this, lastElement)).ToString("G", invariant));
+            sb.Append('>');
+
+            return sb.ToString();
+        }
+    }
+}
+ 22 changes: 22 additions & 0 deletions22  
+tools/ArduinoCsCompiler/Runtime/MiniWaitHandle.cs
+@@ -0,0 +1,22 @@
+﻿// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace ArduinoCsCompiler.Runtime
+{
+    [ArduinoReplacement(typeof(WaitHandle), IncludingPrivates = true)]
+    internal class MiniWaitHandle
+    {
+        [ArduinoImplementation("WaitHandleWaitOneCore")]
+        public static int WaitOneCore(IntPtr waitHandle, int millisecondsTimeout)
+        {
+            throw new NotImplementedException();
+        }
+    }
+}
+  2 changes: 1 addition & 1 deletion2  
+tools/ArduinoCsCompiler/Runtime/UnitsNet/MiniDuration.cs
+@@ -11,7 +11,7 @@ namespace ArduinoCsCompiler.Runtime.UnitsNet
+    internal struct MiniDuration
+    {
+        private double _duration;
+        private DurationUnit _unit;
+        private DurationUnit? _unit;
+
+        private MiniDuration(double value, DurationUnit unit)
+        {
+  2 changes: 1 addition & 1 deletion2  
+tools/ArduinoCsCompiler/Runtime/UnitsNet/MiniLength.cs
+@@ -11,7 +11,7 @@ namespace ArduinoCsCompiler.Runtime.UnitsNet
+    internal struct MiniLength
+    {
+        private double _value;
+        private LengthUnit _unit;
+        private LengthUnit? _unit;
+
+        private MiniLength(double value, LengthUnit unit)
+        {
+  2 changes: 1 addition & 1 deletion2  
+tools/ArduinoCsCompiler/Runtime/UnitsNet/MiniPressure.cs
+@@ -12,7 +12,7 @@ internal struct MiniPressure
+    {
+        private const double DEGREE_TO_KELVIN = 273.15;
+        private double _value;
+        private PressureUnit _unit;
+        private PressureUnit? _unit;
+
+        private MiniPressure(double value, PressureUnit unit)
+        {
+  26 changes: 25 additions & 1 deletion26  
+tools/ArduinoCsCompiler/Runtime/UnitsNet/MiniRelativeHumidity.cs
+@@ -11,7 +11,7 @@ namespace ArduinoCsCompiler.Runtime.UnitsNet
+    internal struct MiniRelativeHumidity
+    {
+        private double _value;
+        private RelativeHumidityUnit _unit;
+        private RelativeHumidityUnit? _unit;
+
+        private MiniRelativeHumidity(double value, RelativeHumidityUnit unit)
+        {
+@@ -39,5 +39,29 @@ public static RelativeHumidity FromPercent(QuantityValue value)
+            double v = (double)value;
+            return new RelativeHumidity(v, RelativeHumidityUnit.Percent);
+        }
+
+        [ArduinoImplementation(CompareByParameterNames = true)]
+        public static bool operator <(MiniRelativeHumidity left, MiniRelativeHumidity right)
+        {
+            return left._value < right._value;
+        }
+
+        [ArduinoImplementation(CompareByParameterNames = true)]
+        public static bool operator >(MiniRelativeHumidity left, MiniRelativeHumidity right)
+        {
+            return left._value > right._value;
+        }
+
+        [ArduinoImplementation(CompareByParameterNames = true)]
+        public static bool operator <=(MiniRelativeHumidity left, MiniRelativeHumidity right)
+        {
+            return left._value <= right._value;
+        }
+
+        [ArduinoImplementation(CompareByParameterNames = true)]
+        public static bool operator >=(MiniRelativeHumidity left, MiniRelativeHumidity right)
+        {
+            return left._value >= right._value;
+        }
+    }
+}
+  2 changes: 1 addition & 1 deletion2  
+tools/ArduinoCsCompiler/Runtime/UnitsNet/MiniTemperature.cs
+@@ -12,7 +12,7 @@ internal struct MiniTemperature
+    {
+        private const double DEGREE_TO_KELVIN = 273.15;
+        private double _value;
+        private TemperatureUnit _unit;
+        private TemperatureUnit? _unit;
+
+        private MiniTemperature(double value, TemperatureUnit unit)
+        {
+  5 changes: 4 additions & 1 deletion5  
+tools/ArduinoCsCompiler/VariableKind.cs
+@@ -29,6 +29,9 @@ public enum VariableKind : byte
+        AddressOfVariable = 35, // An address pointing to a variable slot on another method's stack or arglist
+        FunctionPointer = 36, // A function pointer
+        NativeHandle = 37, // A native handle (or pointer to one)
+        StaticMember = 128, // type is defined by the first value it gets
+        ThreadSpecific = 64, // The variable is thread local or thread static
+        StaticMember = 128, // The field is static
+
+        TypeFilter = 0b0011_1111,
+    }
+}
+  16 changes: 9 additions & 7 deletions16  
+tools/ArduinoCsCompiler/WriteRuntimeCoreData.cs
+@@ -19,6 +19,7 @@ namespace ArduinoCsCompiler
+    /// </summary>
+    public class WriteRuntimeCoreData
+    {
+        private const string AutoGeneratedMessage = "// This code is autogenerated. Any change will be lost when 'acs prepare' is run";
+        private readonly ILogger _logger;
+        private string _targetPath;
+        private string _targetRootPath;
+@@ -139,12 +140,13 @@ private void WriteNativeMethodDefinitions()
+                }
+            }
+
+            IEnumerable<int> duplicates = entries.GroupBy(x => x.Value)
+                .Where(g => g.Count() > 1)
+                .Select(x => x.Key).ToList();
+            var duplicates = entries.GroupBy(x => x.Value)
+                .Where(g => g.Count() > 1).ToList();
+            if (duplicates.Any())
+            {
+                throw new InvalidOperationException($"Duplicate method keys found: {duplicates.First()}");
+                var dup = duplicates.First();
+                var s = entries.First(x => x.Value == dup.Key);
+                throw new InvalidOperationException($"Duplicate method keys found: {dup.Key}: {s}");
+            }
+
+            var list = entries.OrderBy(x => x.Key).Select(y => (y.Key, y.Value));
+@@ -174,7 +176,7 @@ private void WriteNativeMethodList(IEnumerable<(string Key, int Value)> entries,
+            string header = FormattableString.Invariant($@"
+#pragma once
+// This file is autogenerated. Any edits will be lost after running the compiler tests to update the references
+{AutoGeneratedMessage}
+// Native method numbers, ordered by method name
+enum class {name}
+{{
+@@ -246,7 +248,7 @@ private void WriteExecutorCommands()
+            string header = FormattableString.Invariant($@"
+#pragma once
+// This file is autogenerated. Any edits will be lost after running the compiler tests to update the references
+{AutoGeneratedMessage}
+enum class {name} : byte
+{{
+");
+@@ -280,7 +282,7 @@ private void WriteEnumHeaderFile<T>()
+            string header = FormattableString.Invariant($@"
+#pragma once
+// This file is autogenerated. Any edits will be lost after running the compiler tests to update the references
+{AutoGeneratedMessage}
+enum class {name}{size}
+{{
+");
+  138 changes: 113 additions & 25 deletions138  
+tools/ArduinoCsCompiler/samples/WeatherStation/WeatherStation.cs
+@@ -5,6 +5,7 @@
+using System.Collections.Generic;
+using System.Device.Gpio;
+using System.Device.I2c;
+using System.Diagnostics;
+using System.Globalization;
+using System.IO;
+using System.IO.Ports;
+@@ -16,26 +17,35 @@
+using Iot.Device.Arduino;
+using Iot.Device.Bmxx80;
+using Iot.Device.Bmxx80.PowerMode;
+using Iot.Device.Button;
+using Iot.Device.CharacterLcd;
+using Iot.Device.Common;
+using Iot.Device.Graphics;
+using Microsoft.Extensions.Logging;
+using UnitsNet;
+
+namespace WeatherStation
+{
+    internal class WeatherStation
+    {
+        private const int RedLed = 16;
+        private const int Button = 17;
+        private const int Button = 23;
+        private const int TotalPages = 3;
+
+        private const int StationAltitude = 650;
+
+        private readonly ArduinoBoard _board;
+        private Bme680? _bme680;
+        private GpioButton? _button;
+
+        private int _page;
+        private bool _pageChanged;
+
+        private WeatherStation(ArduinoBoard board)
+        {
+            _board = board;
+            _page = 0;
+            _pageChanged = false;
+        }
+
+        public static int Main(string[] args)
+@@ -60,7 +70,7 @@ public static int Main(string[] args)
+                    address = IPAddress.Parse(args[1]);
+                }
+
+                if (!ArduinoBoard.TryConnectToNetworkedBoard(address, 27016, out board))
+                if (!ArduinoBoard.TryConnectToNetworkedBoard(address, 27016, false, out board))
+                {
+                    Console.WriteLine($"Unable to connect to board at address {address}");
+                    return 1;
+@@ -116,7 +126,6 @@ public int Run()
+            GpioController gpioController = _board.CreateGpioController();
+            gpioController.OpenPin(RedLed, PinMode.Output);
+            gpioController.Write(RedLed, PinValue.High);
+            gpioController.OpenPin(Button, PinMode.Input);
+            // This Sleep is just because the display sometimes needs a bit of time to properly initialize -
+            // otherwise it just doesn't properly accept commands
+            Thread.Sleep(1000);
+@@ -129,42 +138,93 @@ public int Run()
+            hd44780.Clear();
+            hd44780.Write("Startup!");
+            Thread.Sleep(500);
+            Length stationAltitude = Length.FromMeters(StationAltitude);
+            LcdConsole console = new LcdConsole(hd44780, "A00", false);
+            LcdCharacterEncoding encoding = LcdConsole.CreateEncoding(CultureInfo.CreateSpecificCulture("de-CH"), "A00", '?', 8);
+            console.LoadEncoding(encoding);
+            console.LineFeedMode = LineWrapMode.Truncate;
+            console.ReplaceLine(0, "Startup!");
+            console.ReplaceLine(1, "Initializing BME680...");
+            // console.ReplaceLine(1, "Initializing BME680...");
+            InitBme();
+            _button = new GpioButton(Button, false, true, gpioController, false, TimeSpan.FromMilliseconds(50));
+            _button.Press += (sender, e) =>
+            {
+                _page = (_page + 1) % TotalPages;
+                _pageChanged = true;
+            };
+            gpioController.Write(RedLed, PinValue.Low);
+            while (gpioController.Read(Button) == PinValue.Low)
+
+            _pageChanged = true;
+
+            Loop(gpioController, console);
+            console.BacklightOn = false;
+            return 0;
+        }
+
+        private void Loop(GpioController gpioController, LcdConsole console)
+        {
+            Length stationAltitude = Length.FromMeters(StationAltitude);
+            int currentPage = _page;
+            Stopwatch sw = new Stopwatch();
+            sw.Start();
+            WriteLogEntry(DateTime.Now);
+            while (!Console.KeyAvailable)
+            {
+                try
+                {
+                    _bme680!.SetPowerMode(Bme680PowerMode.Forced);
+                    if (_pageChanged)
+                    {
+                        console.Clear();
+                        _pageChanged = false;
+                        currentPage = _page;
+                        console.LineFeedMode = LineWrapMode.Truncate;
+                        console.BacklightOn = true;
+                    }
+
+                    var time = DateTime.Now;
+                    if (_bme680.TryReadTemperature(out Temperature temp) && _bme680.TryReadPressure(out Pressure pressure) && _bme680.TryReadHumidity(out RelativeHumidity humidity))
+                    if (sw.Elapsed > TimeSpan.FromMinutes(5))
+                    {
+                        Pressure correctedPressure = WeatherHelper.CalculateBarometricPressure(pressure, temp, stationAltitude);
+                        Temperature dewPoint = WeatherHelper.CalculateDewPoint(temp, humidity);
+                        sw.Restart();
+                        WriteLogEntry(time);
+                    }
+
+                        string temperatureLine = temp.DegreesCelsius.ToString("F2") + " °C " + correctedPressure.Hectopascals.ToString("F1") + " hPa";
+                        string humidityLine = humidity.Percent.ToString("F1") + "% RH, DP: " + dewPoint.DegreesCelsius.ToString("F1") + " °C";
+                    // Console.WriteLine("Elapsed: " + sw.ElapsedMilliseconds.ToString());
+                    // left align the date in the top left corner, right align the time in the top right corner
+                    string dateString = time.ToShortDateString();
+                    string timeString = time.ToLongTimeString();
+                    int totalLength = dateString.Length + timeString.Length;
+                    int totalGaps = console.Size.Width - totalLength; // The number of spaces required between them
+                    string gaps = new String(' ', totalGaps);
+                    console.ReplaceLine(0, dateString + gaps + timeString);
+                    Console.WriteLine(timeString);
+                    if (currentPage == 0)
+                    {
+                        _bme680!.SetPowerMode(Bme680PowerMode.Forced);
+                        if (_bme680.TryReadTemperature(out Temperature temp) && _bme680.TryReadPressure(out Pressure pressure) && _bme680.TryReadHumidity(out RelativeHumidity humidity))
+                        {
+                            Pressure correctedPressure = WeatherHelper.CalculateBarometricPressure(pressure, temp, stationAltitude);
+                            Temperature dewPoint = WeatherHelper.CalculateDewPoint(temp, humidity);
+
+                        console.ReplaceLine(0, temperatureLine);
+                        console.ReplaceLine(1, humidityLine);
+                        Console.WriteLine(temperatureLine);
+                        Console.WriteLine(humidityLine);
+                    }
+                            string temperatureLine = temp.DegreesCelsius.ToString("F2") + " °C " + correctedPressure.Hectopascals.ToString("F1") + " hPa";
+                            string humidityLine = "Humidity:  " + humidity.Percent.ToString("F1") + " %";
+                            string dewPointLine = "Dew Point: " + dewPoint.DegreesCelsius.ToString("F1") + " °C";
+
+                    string line = time.ToLongDateString();
+                    console.ReplaceLine(2, line);
+                    console.SetCursorPosition(0, 3);
+                    Console.WriteLine(line);
+                    line = time.ToLongTimeString();
+                    console.ReplaceLine(3, line);
+                    Console.WriteLine(line);
+                            console.ReplaceLine(1, temperatureLine);
+                            console.ReplaceLine(2, humidityLine);
+                            console.ReplaceLine(3, dewPointLine);
+                        }
+                    }
+                    else if (currentPage == 1)
+                    {
+                        string line = time.ToLongDateString();
+                        console.SetCursorPosition(0, 2);
+                        console.LineFeedMode = LineWrapMode.WordWrap;
+                        console.Write(line);
+                        console.LineFeedMode = LineWrapMode.Truncate;
+                    }
+                    else if (currentPage == 2)
+                    {
+                        console.BacklightOn = false;
+                    }
+                }
+                catch (TimeoutException x)
+                {
+@@ -182,8 +242,36 @@ public int Run()
+                Thread.Sleep(100);
+                gpioController.Write(RedLed, PinValue.Low);
+            }
+        }
+
+            return 0;
+        private void WriteLogEntry(DateTime time)
+        {
+            string logTime = time.ToString("s", CultureInfo.InvariantCulture) + "; ";
+            Length stationAltitude = Length.FromMeters(StationAltitude);
+            _bme680!.SetPowerMode(Bme680PowerMode.Forced);
+            if (_bme680.TryReadTemperature(out Temperature temp) && _bme680.TryReadPressure(out Pressure pressure) && _bme680.TryReadHumidity(out RelativeHumidity humidity))
+            {
+                Pressure correctedPressure = WeatherHelper.CalculateBarometricPressure(pressure, temp, stationAltitude);
+                Temperature dewPoint = WeatherHelper.CalculateDewPoint(temp, humidity);
+                string temperature = temp.DegreesCelsius.ToString("F2") + "; " + correctedPressure.Hectopascals.ToString("F1") + "; ";
+                string humidityLine = humidity.Percent.ToString("F1") + "; ";
+                string dewPointLine = dewPoint.DegreesCelsius.ToString("F1");
+
+                using FileStream fileStream = new FileStream("DataLogger.txt", FileMode.Append, FileAccess.Write);
+                TextWriter tw = new StreamWriter(fileStream);
+                if (fileStream.Position == 0)
+                {
+                    // The file is new, write the header.
+                    tw.WriteLine("Date/Time; Temperature (C); Pressure (hPA); Humidity (%); Dew Point (C)");
+                }
+
+                tw.Write(logTime);
+                tw.Write(temperature);
+                tw.Write(humidityLine);
+                tw.WriteLine(dewPointLine);
+                tw.Flush();
+                fileStream.Dispose();
+            }
+        }
+    }
+}
+  1 change: 1 addition & 0 deletions1  
+tools/ArduinoCsCompiler/samples/WeatherStation/WeatherStation.csproj
+@@ -15,6 +15,7 @@
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\..\src\devices\Arduino\Arduino.csproj" />
+    <ProjectReference Include="..\..\..\..\src\devices\Bmxx80\Bmxx80.csproj" />
+    <ProjectReference Include="..\..\..\..\src\devices\Button\Button.csproj" />
+    <ProjectReference Include="..\..\..\..\src\devices\CharacterLcd\CharacterLcd.csproj" />
+    <ProjectReference Include="..\..\..\..\src\devices\Common\Common.csproj" />
+    <ProjectReference Include="..\..\..\..\src\System.Device.Gpio\System.Device.Gpio.csproj" />
+  2 changes: 1 addition & 1 deletion2  
+tools/ArduinoCsCompiler/tests/ArduinoNativeLibraryTest.cs
+@@ -19,7 +19,7 @@ namespace Iot.Device.Arduino.Tests
+    /// Tests native library functions for the IL Executor
+    /// </summary>
+    [Collection("SingleClientOnly")]
+    [Trait("feature", "firmata-compiler")]
+    [Trait("feature", "firmata")]
+    [Trait("requires", "hardware")]
+    public class ArduinoNativeLibraryTest : ArduinoTestBase, IClassFixture<FirmataTestFixture>
+    {
+  5 changes: 4 additions & 1 deletion5  
+tools/ArduinoCsCompiler/tests/ArduinoTestBase.cs
+@@ -4,6 +4,7 @@
+using System;
+using System.Diagnostics;
+using ArduinoCsCompiler;
+using Iot.Device.Common;
+using Xunit;
+
+namespace Iot.Device.Arduino.Tests
+@@ -27,6 +28,8 @@ public ArduinoTestBase(FirmataTestFixture fixture)
+                MaxMemoryUsage = 350_000
+            };
+
+            ErrorManager.Logger = this.GetCurrentClassLogger();
+
+            _compiler = new MicroCompiler(_fixture.Board!, true);
+
+            if (!_compiler.QueryBoardCapabilities(out IlCapabilities data))
+@@ -102,7 +105,7 @@ protected void ExecuteComplexProgramSuccess<T>(T mainEntryPoint, bool executeLoc
+            var exec = _compiler.PrepareAndRunExecutionSet(mainEntryPoint, CompilerSettings);
+
+            long memoryUsage = exec.EstimateRequiredMemory();
+            Assert.True(memoryUsage < CompilerSettings.MaxMemoryUsage, $"Expected memory usage: {memoryUsage} bytes");
+            Assert.True(memoryUsage < CompilerSettings.MaxMemoryUsage, $"Expected code size less than {CompilerSettings.MaxMemoryUsage} bytes, but was {memoryUsage}");
+
+            var task = exec.MainEntryPoint;
+            task.InvokeAsync(args);
+ 135 changes: 135 additions & 0 deletions135  
+tools/ArduinoCsCompiler/tests/DiningPhilosopher.cs
+@@ -0,0 +1,135 @@
+﻿// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace Iot.Device.Arduino.Tests
+{
+    /// <summary>
+    /// A simple implementation of the Dining Philosophers problem, to test locking and threading
+    /// </summary>
+    internal class DiningPhilosopher
+    {
+        private const int NumPhilosophers = 5;
+        private const int AmountOfSphagetti = 10;
+        private static Random _random = new Random(4711);
+        private readonly int _number;
+        private readonly Fork _left;
+        private readonly Fork _right;
+        private int _amountOfSpaghetti;
+
+        public DiningPhilosopher(int number, Fork left, Fork right, int amountOfSpaghetti)
+        {
+            _number = number;
+            _left = left;
+            _right = right;
+            _amountOfSpaghetti = amountOfSpaghetti;
+        }
+
+        public static void StartDinner()
+        {
+            List<Thread> threads = new List<Thread>();
+            List<Fork> forks = new List<Fork>();
+            for (int i = 0; i < NumPhilosophers + 1; i++)
+            {
+                forks.Add(new Fork(i));
+            }
+
+            for (int i = 0; i < NumPhilosophers; i++)
+            {
+                DiningPhilosopher p;
+                if (i != NumPhilosophers - 1)
+                {
+                    p = new DiningPhilosopher(i, forks[i], forks[i + 1], AmountOfSphagetti);
+                }
+                else
+                {
+                    p = new DiningPhilosopher(i, forks[i], forks[0], AmountOfSphagetti);
+                }
+
+                threads.Add(new Thread(p.ThinkAndEatThread));
+            }
+
+            Console.WriteLine("Dinner starts");
+            foreach (var t in threads)
+            {
+                t.Start();
+            }
+
+            foreach (var t in threads)
+            {
+                t.Join();
+            }
+
+            Console.WriteLine("Everything has been eaten up");
+        }
+
+        public void ThinkAndEatThread()
+        {
+            while (_amountOfSpaghetti > 0)
+            {
+                int decision = _random.Next(10);
+                if (decision < 5)
+                {
+                    TryEat();
+                }
+                else
+                {
+                    Console.WriteLine($"Philosopher {_number} is thinking");
+                    Thread.Sleep(decision * 100);
+                }
+            }
+
+            Console.WriteLine($"Philosopher {_number} has eaten up");
+        }
+
+        private void TryEat()
+        {
+            if (!_left.Take())
+            {
+                Console.WriteLine($"Philosopher {_number} cannot get left fork");
+                return;
+            }
+
+            if (!_right.Take())
+            {
+                Console.WriteLine($"Philosopher {_number} cannot get right fork");
+                _left.Return();
+                return;
+            }
+
+            Console.WriteLine($"Philosopher {_number} is eating. He has {_amountOfSpaghetti} portions left");
+            _amountOfSpaghetti--;
+
+            _right.Return();
+            _left.Return();
+        }
+
+        internal sealed class Fork
+        {
+            public int Number { get; }
+            private object _lock;
+
+            public Fork(int number)
+            {
+                Number = number;
+                _lock = new object();
+            }
+
+            public bool Take()
+            {
+                return Monitor.TryEnter(_lock, 500);
+            }
+
+            public void Return()
+            {
+                Monitor.Exit(_lock);
+            }
+        }
+    }
+}
+  87 changes: 58 additions & 29 deletions87  
+tools/ArduinoCsCompiler/tests/FirmataIlExecutorTests.cs
+@@ -12,15 +12,13 @@
+using System.Text;
+using System.Threading;
+using ArduinoCsCompiler;
+using Microsoft.VisualBasic.CompilerServices;
+using Xunit;
+using Xunit.Sdk;
+using TestMethodStarting = Xunit.TestMethodStarting;
+
+namespace Iot.Device.Arduino.Tests
+{
+    [Collection("SingleClientOnly")]
+    [Trait("feature", "firmata-compiler")]
+    [Trait("feature", "firmata")]
+    [Trait("requires", "hardware")]
+    public sealed class FirmataIlExecutorTests : ArduinoTestBase, IClassFixture<FirmataTestFixture>, IDisposable
+    {
+@@ -30,9 +28,9 @@ public FirmataIlExecutorTests(FirmataTestFixture fixture)
+            Compiler.ClearAllData(true, false);
+        }
+
+        private void LoadCodeMethod<T1, T2, T3>(string methodName, T1 a, T2 b, T3 expectedResult, CompilerSettings? settings = null, bool executeLocally = true)
+        private void LoadCodeMethod<T1, T2, T3>(Type testClass, string methodName, T1 a, T2 b, T3 expectedResult, CompilerSettings? settings = null, bool executeLocally = true)
+        {
+            var methods = typeof(TestMethods).GetMethods().Where(x => x.Name == methodName).ToList();
+            var methods = testClass.GetMethods().Where(x => x.Name == methodName).ToList();
+            var method = methods.Single();
+
+            if (settings == null)
+@@ -45,10 +43,6 @@ public FirmataIlExecutorTests(FirmataTestFixture fixture)
+                settings.AdditionalSuppressions.Add("System.SR");
+            }
+
+            var set = Compiler.PrepareAndRunExecutionSet(method, settings);
+
+            CancellationTokenSource cs = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+
+            if (executeLocally)
+            {
+                // First execute the method locally, so we don't have an error in the test
+@@ -65,6 +59,12 @@ public FirmataIlExecutorTests(FirmataTestFixture fixture)
+                Assert.Equal(expectedResult, result1);
+            }
+
+            ErrorManager.Clear();
+            var set = Compiler.PrepareAndRunExecutionSet(method, settings);
+
+            // This always aborts when debugging tests, preventing that we can get stack dumps., so use a looong timeout for that
+            CancellationTokenSource cs = new CancellationTokenSource(System.Diagnostics.Debugger.IsAttached ? -1 : (int)TimeSpan.FromSeconds(60).TotalMilliseconds);
+
+            var remoteMethod = set.MainEntryPoint;
+
+            // This assertion fails on a timeout
+@@ -79,6 +79,8 @@ public FirmataIlExecutorTests(FirmataTestFixture fixture)
+            Assert.Equal(MethodState.Stopped, state);
+            Assert.Single(data);
+
+            Assert.True(ErrorManager.NumErrors == 0, "There were compilation errors");
+
+            T3 result = (T3)data[0];
+            Assert.Equal(expectedResult, result);
+            remoteMethod.Dispose();
+@@ -140,7 +142,7 @@ public void MainMethodMustBeStatic()
+        [InlineData(nameof(TestMethods.SmallerOrEqualS), -2, -2, true)]
+        public void TestBooleanOperation(string methodName, int argument1, int argument2, bool expected)
+        {
+            LoadCodeMethod(methodName, argument1, argument2, expected);
+            LoadCodeMethod(typeof(TestMethods), methodName, argument1, argument2, expected);
+        }
+
+        [Theory]
+@@ -175,7 +177,7 @@ public void TestBooleanOperation(string methodName, int argument1, int argument2
+        [InlineData(nameof(TestMethods.RshUnS), -8, 1, 2147483644)]
+        public void TestArithmeticOperationSigned(string methodName, int argument1, int argument2, int expected)
+        {
+            LoadCodeMethod(methodName, argument1, argument2, expected);
+            LoadCodeMethod(typeof(TestMethods), methodName, argument1, argument2, expected);
+        }
+
+        [Theory]
+@@ -209,7 +211,7 @@ public void TestArithmeticOperationSignedWithOverflow(string methodName, int arg
+        [InlineData(nameof(TestMethods.LoadFloatConstant), 0.0, 0.0, 2.0)] // tests the LDC.R4 instruction
+        public void TestArithmeticOperationSignedFloat(string methodName, float argument1, float argument2, float expected)
+        {
+            LoadCodeMethod(methodName, argument1, argument2, expected);
+            LoadCodeMethod(typeof(TestMethods), methodName, argument1, argument2, expected);
+        }
+
+        [Theory]
+@@ -233,7 +235,7 @@ public void TestArithmeticOperationSignedFloat(string methodName, float argument
+        [InlineData(nameof(TestMethods.LoadDoubleConstant), 0.0, 0.0, 2.0)] // tests the LDC.R8 instruction
+        public void TestArithmeticOperationSignedDouble(string methodName, double argument1, double argument2, double expected)
+        {
+            LoadCodeMethod(methodName, argument1, argument2, expected);
+            LoadCodeMethod(typeof(TestMethods), methodName, argument1, argument2, expected);
+        }
+
+        [Theory]
+@@ -260,15 +262,15 @@ public void TestArithmeticOperationSignedDouble(string methodName, double argume
+        public void TestArithmeticOperationUnsigned(string methodName, Int64 argument1, Int64 argument2, Int64 expected)
+        {
+            // Method signature as above, otherwise the test data conversion fails
+            LoadCodeMethod(methodName, (uint)argument1, (uint)argument2, (uint)expected);
+            LoadCodeMethod(typeof(TestMethods), methodName, (uint)argument1, (uint)argument2, (uint)expected);
+        }
+
+        [Theory]
+        [InlineData(nameof(TestMethods.ResultTypesTest), 50, 20, 70)]
+        [InlineData(nameof(TestMethods.ResultTypesTest2), 21, -20, 1)]
+        public void TestTypeConversions(string methodName, UInt32 argument1, int argument2, Int32 expected)
+        {
+            LoadCodeMethod(methodName, argument1, argument2, expected);
+            LoadCodeMethod(typeof(TestMethods), methodName, argument1, argument2, expected);
+        }
+
+        [Theory]
+@@ -281,7 +283,7 @@ public void TestTypeConversions(string methodName, UInt32 argument1, int argumen
+        [InlineData(nameof(TestMethods.StaggedArrayTest), 5, 7, (int)'3')]
+        public void ArrayTests(string methodName, Int32 argument1, Int32 argument2, Int32 expected)
+        {
+            LoadCodeMethod(methodName, argument1, argument2, expected);
+            LoadCodeMethod(typeof(TestMethods), methodName, argument1, argument2, expected);
+        }
+
+        [Theory]
+@@ -295,7 +297,7 @@ public void ArrayTests(string methodName, Int32 argument1, Int32 argument2, Int3
+        [InlineData(nameof(TestMethods.StructInterfaceCall3), 15, 3, 12)]
+        public void StructTests(string methodName, Int32 argument1, Int32 argument2, Int32 expected)
+        {
+            LoadCodeMethod(methodName, argument1, argument2, expected);
+            LoadCodeMethod(typeof(TestMethods), methodName, argument1, argument2, expected);
+        }
+
+        [Theory]
+@@ -308,21 +310,21 @@ public void StructTests(string methodName, Int32 argument1, Int32 argument2, Int
+        [InlineData(nameof(TestMethods.LargeStructList2), 1, 2, 1)]
+        public void LargeStructTest(string methodName, Int32 argument1, Int32 argument2, Int32 expected)
+        {
+            LoadCodeMethod(methodName, argument1, argument2, expected);
+            LoadCodeMethod(typeof(TestMethods), methodName, argument1, argument2, expected);
+        }
+
+        [Theory]
+        [InlineData(nameof(TestMethods.CastClassTest), 0, 0, 1)]
+        public void CastTest(string methodName, Int32 argument1, Int32 argument2, Int32 expected)
+        {
+            LoadCodeMethod(methodName, argument1, argument2, expected, new CompilerSettings() { CreateKernelForFlashing = false, UseFlashForKernel = false });
+            LoadCodeMethod(typeof(TestMethods), methodName, argument1, argument2, expected, new CompilerSettings() { CreateKernelForFlashing = false, UseFlashForKernel = false });
+        }
+
+        [Theory]
+        [InlineData(nameof(TestMethods.SpanImplementationBehavior), 5, 1, 1)]
+        public void SpanTest(string methodName, Int32 argument1, Int32 argument2, Int32 expected)
+        {
+            LoadCodeMethod(methodName, argument1, argument2, expected);
+            LoadCodeMethod(typeof(TestMethods), methodName, argument1, argument2, expected);
+        }
+
+        [Theory]
+@@ -331,7 +333,7 @@ public void SpanTest(string methodName, Int32 argument1, Int32 argument2, Int32
+        [InlineData(nameof(TestMethods.EnumGetValues2))]
+        public void EnumTest(string methodName)
+        {
+            LoadCodeMethod(methodName, 0, 0, 1);
+            LoadCodeMethod(typeof(TestMethods), methodName, 0, 0, 1);
+        }
+
+        [Fact]
+@@ -345,7 +347,7 @@ public void EnumsHaveNames()
+                UseFlashForProgram = false
+            };
+
+            LoadCodeMethod(nameof(TestMethods.EnumsHaveNames), 0, 0, 1, compilerSettings, false);
+            LoadCodeMethod(typeof(TestMethods), nameof(TestMethods.EnumsHaveNames), 0, 0, 1, compilerSettings, false);
+        }
+
+        [Theory]
+@@ -361,7 +363,7 @@ public void DoubleToStringTest(string name)
+                UseFlashForProgram = true
+            };
+
+            LoadCodeMethod(name, 20.23, 202.1, 20.23, compilerSettings);
+            LoadCodeMethod(typeof(TestMethods), name, 20.23, 202.1, 20.23, compilerSettings);
+        }
+
+        /// <summary>
+@@ -376,6 +378,7 @@ public void DoubleToStringTest(string name)
+        [InlineData(nameof(TestMethods.LcdCharacterEncodingTest1), 0)]
+        [InlineData(nameof(TestMethods.LcdCharacterEncodingTest2), 0)]
+        [InlineData(nameof(TestMethods.StringInterpolation), 0)]
+        [InlineData(nameof(TestMethods.UseStringlyTypedDictionary), 1)]
+        [InlineData(nameof(TestMethods.UnitsNetTemperatureTest), 0)]
+        [InlineData(nameof(TestMethods.StringEncoding), 0)]
+        [InlineData(nameof(TestMethods.PrivateImplementationDetailsUsedCorrectly), 0)]
+@@ -389,7 +392,13 @@ public void BrokenImplementationBehaviorValidation(string methodName, int arg1)
+                UseFlashForProgram = true
+            };
+
+            LoadCodeMethod(methodName, arg1, 0, 1, compilerSettings);
+            LoadCodeMethod(typeof(TestMethods), methodName, arg1, 0, 1, compilerSettings);
+        }
+
+        [Fact]
+        public void ValidateTestMethods()
+        {
+            Assert.Equal(1, TestMethods.UseStringlyTypedDictionary(1, 2));
+        }
+
+        [Theory]
+@@ -406,7 +415,7 @@ public void IteratorProblems(string methodName, int arg1)
+                UseFlashForProgram = true
+            };
+
+            LoadCodeMethod(methodName, arg1, 0, 1, compilerSettings);
+            LoadCodeMethod(typeof(TestMethods), methodName, arg1, 0, 1, compilerSettings);
+        }
+
+        /// <summary>
+@@ -426,7 +435,7 @@ public void CanMergeSimilarGenericMethods(string methodName, int arg1)
+                UseFlashForProgram = true
+            };
+
+            LoadCodeMethod(methodName, arg1, 0, 1, compilerSettings);
+            LoadCodeMethod(typeof(TestMethods), methodName, arg1, 0, 1, compilerSettings);
+        }
+
+        [Theory]
+@@ -452,7 +461,7 @@ public void ExceptionHandling(string methodName, int arg1)
+                UseFlashForProgram = true
+            };
+
+            LoadCodeMethod(methodName, arg1, 0, 1, compilerSettings);
+            LoadCodeMethod(typeof(TestMethods), methodName, arg1, 0, 1, compilerSettings);
+        }
+
+        [Theory]
+@@ -468,15 +477,35 @@ public void ExceptionHandlingForBuiltinErrors(string methodName, int arg1)
+                UseFlashForProgram = false
+            };
+
+            LoadCodeMethod(methodName, arg1, 0, 1, compilerSettings);
+            LoadCodeMethod(typeof(TestMethods), methodName, arg1, 0, 1, compilerSettings);
+        }
+
+        [Theory]
+        [InlineData(nameof(TestMethods.StringContains), 1)]
+        [InlineData(nameof(TestMethods.StringStartsWith), 1)]
+        public void StringTest(string methodName, Int32 expected)
+        {
+            LoadCodeMethod(methodName, 0, 0, expected);
+            LoadCodeMethod(typeof(TestMethods), methodName, 0, 0, expected);
+        }
+
+        [Theory]
+        [InlineData(nameof(ThreadingTests.StartAndStopThread), 0, 0, 1)]
+        [InlineData(nameof(ThreadingTests.DiningPhilosophers), 0, 0, 1)]
+        [InlineData(nameof(ThreadingTests.UseThreadStatic), 0, 0, 1)]
+        [InlineData(nameof(ThreadingTests.UseThreadStaticInSystem), 10, 5, 1)]
+        [InlineData(nameof(ThreadingTests.UseArrayPool), 0, 0, 1)]
+        [InlineData(nameof(ThreadingTests.AsyncAwait), 0, 0, 1)]
+        [InlineData(nameof(ThreadingTests.TestTask), 0, 0, 1)]
+        public void SimpleThreading(string methodName, Int32 a, Int32 b, Int32 expected)
+        {
+            // No exclusions for this test
+            var settings = new CompilerSettings()
+            {
+                CreateKernelForFlashing = false,
+                UseFlashForKernel = false
+            };
+
+            LoadCodeMethod(typeof(ThreadingTests), methodName, a, b, expected, settings);
+        }
+    }
+}
+  17 changes: 16 additions & 1 deletion17  
+tools/ArduinoCsCompiler/tests/FrameworkBehaviorTests.cs
+@@ -3,13 +3,14 @@
+
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
+using System.Linq;
+using System.Numerics;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading.Tasks;
+using ArduinoCsCompiler;
+using Xunit;
+
+#pragma warning disable SA1405 // Debug.Assert without description
+@@ -131,6 +132,20 @@ public void TestRounding()
+            Assert.Equal(1024, RoundUp(100, 1024));
+        }
+
+        /// <summary>
+        /// Documentation and implementation don't match - so test this
+        /// </summary>
+        [Fact]
+        public void TestHexParsing()
+        {
+            string hexNumber = "0x9f";
+            Assert.True(Debugger.TryParseHexOrDec(hexNumber, out int number));
+            Assert.Equal(0x9f, number);
+            Assert.False(Debugger.TryParseHexOrDec("0x", out number));
+            Assert.True(Debugger.TryParseHexOrDec("234", out number));
+            Assert.Equal(234, number);
+        }
+
+        private long RoundUp(long offset, long align)
+        {
+            long evenBy = offset % align;
+  2 changes: 1 addition & 1 deletion2  
+tools/ArduinoCsCompiler/tests/GarbageCollectorTests.cs
+@@ -14,7 +14,7 @@
+namespace Iot.Device.Arduino.Tests
+{
+    [Collection("SingleClientOnly")]
+    [Trait("feature", "firmata-compiler")]
+    [Trait("feature", "firmata")]
+    [Trait("requires", "hardware")]
+    public class GarbageCollectorTests : ArduinoTestBase, IClassFixture<FirmataTestFixture>, IDisposable
+    {
+ 105 changes: 105 additions & 0 deletions105  
+tools/ArduinoCsCompiler/tests/MicroCompilerTests.cs
+@@ -0,0 +1,105 @@
+﻿// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using ArduinoCsCompiler;
+using UnitsNet.Units;
+using Xunit;
+
+namespace Iot.Device.Arduino.Tests
+{
+    /// <summary>
+    /// Unit tests for the compiler (integration tests for the compiler are separate)
+    /// </summary>
+    public class MicroCompilerTests
+    {
+        [Fact]
+        public void TestClassComparator()
+        {
+            Type a = typeof(ElectricChargeUnit[]);
+            Type b = typeof(ElectricAdmittanceUnit[]);
+
+            ClassDeclaration ca = new ClassDeclaration(a, 4, 4, 1, new List<ClassMember>(), new List<Type>());
+            ClassDeclaration cb = new ClassDeclaration(b, 4, 4, 2, new List<ClassMember>(), new List<Type>());
+
+            Assert.False(ca.Equals(cb));
+
+            var cp = new MicroCompiler.ClassDeclarationByInheritanceSorter();
+
+            int result1 = cp.Compare(ca, cb);
+            int result2 = cp.Compare(cb, ca);
+            Assert.NotEqual(result1, result2);
+            Assert.NotEqual(0, result1);
+        }
+
+        [Fact]
+        public void AssignArrays()
+        {
+            Type a = typeof(S1[]);
+            Type b = typeof(S2[]);
+
+            Assert.True(a.IsAssignableFrom(b));
+            Assert.True(b.IsAssignableFrom(a));
+        }
+
+        [Fact]
+        public void AssignEnums()
+        {
+            Type a = typeof(S1);
+            Type b = typeof(S2);
+
+            Assert.False(a.IsAssignableFrom(b));
+            Assert.False(b.IsAssignableFrom(a));
+        }
+
+        [Fact]
+        public void NullableEqualityComparer()
+        {
+            var t = new NullableEqualityComparer1<int>();
+            Assert.False(t.Equals(null));
+        }
+
+        [Fact]
+        public void Nullability1()
+        {
+            var t = typeof(Nullable<int>);
+            var args = t.GetGenericArguments();
+            Assert.True(args.Length == 1);
+            Assert.Equal(typeof(int), args[0]);
+            var targs = t.GenericTypeArguments;
+            Assert.Equal(args, targs);
+        }
+
+        internal enum S1
+        {
+            None,
+            One,
+            Two
+        }
+
+        internal enum S2
+        {
+            Keins,
+            Eins,
+            Zwei,
+        }
+
+        public sealed class NullableEqualityComparer1<T> : EqualityComparer<T?>
+            where T : struct, IEquatable<T>
+        {
+            public override bool Equals(T? x, T? y)
+            {
+                throw new NotImplementedException();
+            }
+
+            public override int GetHashCode(T? obj)
+            {
+                throw new NotImplementedException();
+            }
+        }
+    }
+}
+  2 changes: 1 addition & 1 deletion2  
+tools/ArduinoCsCompiler/tests/MiniExamples.cs
+@@ -29,7 +29,7 @@ namespace Iot.Device.Arduino.Tests
+    /// This class contains some larger examples for the Arduino compiler
+    /// </summary>
+    [Collection("SingleClientOnly")]
+    [Trait("feature", "firmata-compiler")]
+    [Trait("feature", "firmata")]
+    [Trait("requires", "hardware")]
+    public class MiniExamples : ArduinoTestBase, IClassFixture<FirmataTestFixture>
+    {
+  7 changes: 7 additions & 0 deletions7  
+tools/ArduinoCsCompiler/tests/TestMethods.cs
+@@ -1191,6 +1191,13 @@ public static int StringInterpolation(int arg1, int arg2)
+            return 1;
+        }
+
+        public static int UseStringlyTypedDictionary(int arg1, int arg2)
+        {
+            var dict = new Dictionary<string, int>();
+            dict.Add("Blah", 1);
+            return dict.Count;
+        }
+
+        private class StuffThatNeedsDisposing : IDisposable
+        {
+            public StuffThatNeedsDisposing(int initialValue)
+ 139 changes: 139 additions & 0 deletions139  
+tools/ArduinoCsCompiler/tests/ThreadingTests.cs
+@@ -0,0 +1,139 @@
+﻿// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+
+using System;
+using System.Buffers;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using ArduinoCsCompiler.Runtime;
+using Xunit;
+
+namespace Iot.Device.Arduino.Tests
+{
+    public class ThreadingTests
+    {
+        private static int s_data = 0;
+
+        [ThreadStatic]
+        private static int s_threadStatic = 0;
+
+        public static int StartAndStopThread(int a, int b)
+        {
+            s_data = 0;
+            Thread t = new Thread(MyStaticThreadStart1);
+            t.Start();
+            t.Join();
+            return s_data;
+        }
+
+        public static int UseThreadStatic(int a, int b)
+        {
+            s_threadStatic = 1;
+            Thread t = new Thread(UseThreadStaticVariable);
+            t.Start();
+            t.Join();
+
+            MiniAssert.That(s_threadStatic == 1);
+            return 1;
+        }
+
+        public static int UseThreadStaticInSystem(int a, int b)
+        {
+            Console.WriteLine($"Outside, we print {a}");
+            Thread t = new Thread(PrintNumber);
+            t.Start(a);
+            t.Join();
+            Console.WriteLine($"And then, we print {a}+{b}={a + b}");
+            MiniAssert.That(s_data == a);
+            return 1;
+        }
+
+        public static int DiningPhilosophers(int a, int b)
+        {
+            DiningPhilosopher.StartDinner();
+            return 1;
+        }
+
+        public static int UseArrayPool(int a, int b)
+        {
+            var firstArray = ArrayPool<char>.Shared.Rent(0x100);
+            firstArray[0] = 'x';
+            firstArray[1] = 'y';
+
+            Thread t = new Thread(ArrayPoolThread);
+            t.Start('a');
+            t.Join();
+            t = new Thread(ArrayPoolThread);
+            t.Start('b');
+            t.Join();
+            MiniAssert.That(firstArray[0] == 'x');
+            MiniAssert.That(firstArray[1] == 'y');
+            ArrayPool<char>.Shared.Return(firstArray);
+            var yetTheSameArray = ArrayPool<char>.Shared.Rent(0x100);
+            MiniAssert.That(ReferenceEquals(firstArray, yetTheSameArray));
+            yetTheSameArray[2] = 'z';
+            ArrayPool<char>.Shared.Return(yetTheSameArray);
+            return 1;
+        }
+
+        public static int TestTask(int a, int b)
+        {
+            var t = Task.Factory.StartNew(() => 1);
+
+            MiniAssert.That(t.Result == 1);
+            return t.Result;
+        }
+
+        public static int AsyncAwait(int a, int b)
+        {
+            var t = DoSomeExpensiveCalculation();
+            return t.Result;
+        }
+
+        private static void MyStaticThreadStart1()
+        {
+            s_data = 1;
+        }
+
+        private static void UseThreadStaticVariable()
+        {
+            MiniAssert.That(s_threadStatic == 0);
+            s_threadStatic = 2;
+            MiniAssert.That(s_threadStatic == 2);
+        }
+
+        private static void PrintNumber(object? o)
+        {
+            if (o == null)
+            {
+                Console.WriteLine("Our parameter is null");
+                return;
+            }
+
+            int i = (int)o;
+            s_data = i;
+            Console.WriteLine($"The number is {i}.");
+            Console.WriteLine($"And later, the number will be {i + 1}");
+        }
+
+        private static void ArrayPoolThread(object? o)
+        {
+            char c = (char)o!;
+            var firstArray = ArrayPool<char>.Shared.Rent(0x100);
+            MiniAssert.That(firstArray[0] == 0);
+            firstArray[0] = c;
+            firstArray[1] = c;
+            ArrayPool<char>.Shared.Return(firstArray);
+        }
+
+        private static async Task<int> DoSomeExpensiveCalculation()
+        {
+            int b = 2 - 1;
+            await Task.Delay(1000);
+            return b;
+        }
+    }
+}
